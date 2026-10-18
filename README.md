@@ -54,6 +54,18 @@ Requires Windows 10 or 11 (64-bit). The installers are small (about 3 to 4 MB) a
 
 ChatVault is a local app. It only **reads** your chat files, never uploads them and needs no account. The only network request it makes is to GitHub, to check for a new version. It never touches your sign-in files.
 
+## Code signing policy
+
+The installers are built from this repository by the [release workflow](.github/workflows/release.yml) on GitHub Actions, and every release is approved by hand before it is published. ChatVault is applying for free code signing from [SignPath Foundation](https://signpath.org). Until that is approved, the Windows installers are not code signed, so Windows may show an "unknown publisher" warning. The update files carry a separate updater signature that the app checks before installing an update.
+
+**Team roles**
+
+- Author, reviewer and approver: [@ssanaullahrais](https://github.com/ssanaullahrais). Every release is approved by this person before signing.
+
+**Privacy**
+
+ChatVault does not send information to any other networked system, except a check against GitHub for a new version. See [Privacy](#privacy).
+
 ## Keyboard shortcuts
 
 | Keys | Action |
