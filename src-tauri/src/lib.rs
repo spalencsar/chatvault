@@ -1,6 +1,7 @@
 mod cursor;
 mod index;
 mod others;
+mod pageindex;
 mod paths;
 mod providers;
 mod sync;
@@ -507,8 +508,23 @@ async fn read_chat_page(provider: String, path: String, before: Option<usize>, l
             return Ok(MsgPage { messages: all[start..end].to_vec(), total, start });
         }
         let p = check_transcript(&path)?;
-        let lines = open_lines(&p).ok_or("Cannot open that chat")?;
         let limit = limit.clamp(1, 2000);
+        // A plain transcript is indexed once, so a page only reads its own lines. A compressed one is read through.
+        if p.extension().map(|e| e != "zst").unwrap_or(true) {
+            let index = pageindex::get(&provider, &p)?;
+            let total = index.total();
+            return Ok(match before {
+                None => {
+                    let start = total.saturating_sub(limit);
+                    MsgPage { messages: pageindex::read_range(&provider, &p, &index, start, total)?, total, start }
+                }
+                Some(b) => {
+                    let lo = b.saturating_sub(limit);
+                    MsgPage { messages: pageindex::read_range(&provider, &p, &index, lo, b)?, total, start: lo }
+                }
+            });
+        }
+        let lines = open_lines(&p).ok_or("Cannot open that chat")?;
         let mut idx = 0usize;
         let mut ring: VecDeque<Msg> = VecDeque::new();
         let mut picked: Vec<Msg> = Vec::new();
@@ -879,7 +895,9 @@ fn open_file_default(path: String, base: Option<String>) -> Result<(), String> {
     if BLOCKED.contains(&ext.as_str()) {
         return Err("Programs and scripts are not opened from here. Use Show in folder instead.".into());
     }
-    Command::new("cmd").args(["/C", "start", ""]).arg(plain(&canon)).spawn().map_err(|e| e.to_string())?;
+    // Explorer opens the file with its default app and reads the name as plain text, so characters such as & or % in
+    // a file name are never treated as commands, as they are by `cmd /C start`.
+    Command::new("explorer").arg(plain(&canon)).spawn().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -890,7 +908,12 @@ async fn read_text_file(path: String, base: Option<String>, hints: Option<Vec<St
         let canon = resolve_file(&path, &base, hints)?;
         let meta = fs::metadata(&canon).map_err(|e| e.to_string())?;
         let size = meta.len();
-        let mut bytes = fs::read(&canon).map_err(|e| e.to_string())?;
+        // Only the first 1.5 MB is read, so a huge file named in a chat cannot fill the memory.
+        let mut bytes = Vec::new();
+        {
+            use std::io::Read;
+            fs::File::open(&canon).map_err(|e| e.to_string())?.take(1_500_001).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        }
         let truncated = bytes.len() > 1_500_000;
         bytes.truncate(1_500_000);
         if bytes.iter().take(8000).any(|b| *b == 0) {
@@ -1090,6 +1113,28 @@ fn save_handoff(title: String, content: String) -> Result<String, String> {
 
 const HANDOFF_PROMPT: &str = "It is the transcript of an earlier AI coding session on this project. Continue the work from exactly where it stopped, and follow the project rules it mentions.";
 
+/// PowerShell ends a single-quoted string at any of these, not only at the plain apostrophe.
+fn is_ps_quote(c: char) -> bool {
+    matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}')
+}
+
+/// Text made safe to sit inside a single-quoted PowerShell string: every kind of quote is doubled, and line breaks
+/// become spaces, so nothing typed or pasted can end the string and run as a command.
+fn ps_single_quoted_inner(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if is_ps_quote(c) {
+            out.push(c);
+            out.push(c);
+        } else if c == '\r' || c == '\n' {
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Opens a new PowerShell window in the chat's folder and starts Claude Code or Codex there.
 /// agent: claude | claude-fork | claude-handoff | codex-resume | codex-fork | codex-handoff
 #[tauri::command]
@@ -1101,7 +1146,7 @@ fn launch_agent(agent: String, id: String, cwd: Option<String>, handoff: Option<
         .ok_or("No folder to start in")?;
     let handoff_path = |h: Option<String>| -> Result<String, String> {
         let path = h.ok_or("Missing handoff file")?;
-        if path.contains('\'') || !Path::new(&path).is_file() {
+        if path.chars().any(|c| is_ps_quote(c) || c.is_control()) || !Path::new(&path).is_file() {
             return Err("Invalid handoff file".into());
         }
         Ok(path)
@@ -1109,7 +1154,7 @@ fn launch_agent(agent: String, id: String, cwd: Option<String>, handoff: Option<
     // The prompt ChatVault built (same text as "Copy prompt"), as the inside of a single-quoted PowerShell string.
     let text = |path: &str| -> String {
         match &prompt {
-            Some(p) if !p.trim().is_empty() => p.replace("'", "''"),
+            Some(p) if !p.trim().is_empty() => ps_single_quoted_inner(p),
             _ => format!("Read the file {} completely. {}", path, HANDOFF_PROMPT),
         }
     };
@@ -1442,5 +1487,27 @@ mod export_tests {
         let mut v = Vec::new();
         walk_files(p, &["md", "tmp"], &mut v);
         v.len()
+    }
+}
+
+#[cfg(test)]
+mod launch_quote_tests {
+    use super::*;
+
+    #[test]
+    fn every_powershell_quote_is_doubled() {
+        assert_eq!(ps_single_quoted_inner("don't"), "don''t");
+        assert_eq!(ps_single_quoted_inner("don\u{2019}t"), "don\u{2019}\u{2019}t");
+        assert_eq!(ps_single_quoted_inner("a\u{2018}b\u{201A}c\u{201B}d"), "a\u{2018}\u{2018}b\u{201A}\u{201A}c\u{201B}\u{201B}d");
+    }
+
+    #[test]
+    fn line_breaks_cannot_start_a_new_command() {
+        assert_eq!(ps_single_quoted_inner("one\r\ntwo\nthree"), "one  two three");
+    }
+
+    #[test]
+    fn plain_text_is_unchanged() {
+        assert_eq!(ps_single_quoted_inner("Read the file C:/a b/c.md"), "Read the file C:/a b/c.md");
     }
 }

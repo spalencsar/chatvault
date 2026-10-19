@@ -65,15 +65,63 @@ function useCopied() {
   return [copied, run] as const;
 }
 
+/** The size of a picture, read from the first bytes of its data (PNG, GIF, JPEG or WebP), so its space can be kept before it has loaded. */
+const sizes = new Map<string, { w: number; h: number } | null>();
+function imageSize(src: string): { w: number; h: number } | null {
+  if (sizes.has(src)) return sizes.get(src) ?? null;
+  let found: { w: number; h: number } | null = null;
+  try {
+    const comma = src.indexOf(",");
+    if (src.startsWith("data:image/") && comma > 0 && src.includes(";base64")) {
+      const head = src.slice(comma + 1, comma + 1 + 87380); // about the first 64 KB of the file
+      const bin = atob(head.slice(0, head.length - (head.length % 4)));
+      const b = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+      if (b[0] === 0x89 && b[1] === 0x50) found = { w: ((b[16] << 24) | (b[17] << 16) | (b[18] << 8) | b[19]) >>> 0, h: ((b[20] << 24) | (b[21] << 16) | (b[22] << 8) | b[23]) >>> 0 };
+      else if (b[0] === 0x47 && b[1] === 0x49) found = { w: b[6] | (b[7] << 8), h: b[8] | (b[9] << 8) };
+      else if (b[0] === 0xff && b[1] === 0xd8) {
+        for (let i = 2; i + 9 < b.length; ) {
+          if (b[i] !== 0xff) break;
+          const m = b[i + 1];
+          if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) {
+            found = { w: (b[i + 7] << 8) | b[i + 8], h: (b[i + 5] << 8) | b[i + 6] };
+            break;
+          }
+          i += 2 + ((b[i + 2] << 8) | b[i + 3]);
+        }
+      } else if (b[0] === 0x52 && b[8] === 0x57) {
+        const kind = String.fromCharCode(b[12], b[13], b[14], b[15]);
+        if (kind === "VP8 ") found = { w: (b[26] | (b[27] << 8)) & 0x3fff, h: (b[28] | (b[29] << 8)) & 0x3fff };
+        else if (kind === "VP8L") found = { w: 1 + (((b[22] & 0x3f) << 8) | b[21]), h: 1 + (((b[24] & 0xf) << 10) | (b[23] << 2) | ((b[22] & 0xc0) >> 6)) };
+        else if (kind === "VP8X") found = { w: 1 + (b[24] | (b[25] << 8) | (b[26] << 16)), h: 1 + (b[27] | (b[28] << 8) | (b[29] << 16)) };
+      }
+    }
+  } catch {
+    found = null;
+  }
+  if (found && (!(found.w > 0) || !(found.h > 0) || found.w > 60000 || found.h > 60000)) found = null;
+  sizes.set(src, found);
+  return found;
+}
+
 /** A picture in the conversation, with actions that appear on hover. */
 export function ChatImage({ src }: { src: string }) {
   const g = useContext(GalleryContext);
   const [copied, copy] = useCopied();
   const n = Math.max(1, g.images.indexOf(src) + 1);
+  const size = imageSize(src);
   return (
     <div className="group/img relative inline-block max-w-full overflow-hidden rounded-xl border bg-muted/30 shadow-sm">
       <button type="button" onClick={() => g.open(src)} className="block cursor-zoom-in" aria-label="Open image">
-        <img src={src} alt="Chat attachment" loading="lazy" className="block max-h-80 max-w-full object-contain" />
+        <img
+          src={src}
+          alt="Chat attachment"
+          decoding="async"
+          // Its space is kept from the first frame, so a picture appearing never pushes the messages below it.
+          width={size ? Math.round(size.w * Math.min(1, 320 / size.h)) : undefined}
+          height={size ? Math.round(size.h * Math.min(1, 320 / size.h)) : undefined}
+          style={size ? { aspectRatio: `${size.w} / ${size.h}` } : undefined}
+          className="block h-auto max-h-80 max-w-full object-contain"
+        />
       </button>
       <div className="absolute right-2 top-2 flex gap-1 rounded-lg bg-black/60 p-1 opacity-0 backdrop-blur transition-opacity focus-within:opacity-100 group-hover/img:opacity-100">
         <IconBtn label="Open full screen" onClick={() => g.open(src)}>

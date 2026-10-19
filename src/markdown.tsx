@@ -1,4 +1,4 @@
-import { Children, isValidElement, type ReactNode } from "react";
+import { Children, isValidElement, memo, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
@@ -15,7 +15,7 @@ const text = (node: ReactNode): string =>
  * Chat text rendered as GitHub-flavoured Markdown: headings, bold and italic, lists, task lists, quotes,
  * tables, rules and inline code. Links become inline citations and search matches stay highlighted.
  */
-export function Markdown({ source, q, active, breaks }: { source: string; q: string; active: boolean; breaks?: boolean }) {
+function MarkdownImpl({ source, q, active, breaks }: { source: string; q: string; active: boolean; breaks?: boolean }) {
   const files = useFileView();
   let taken = false;
   const hl = (children: ReactNode): ReactNode =>
@@ -74,3 +74,6 @@ export function Markdown({ source, q, active, breaks }: { source: string; q: str
     </ReactMarkdown>
   );
 }
+
+/** Re-parsed only when its text or the search changes, not on every scroll frame. */
+export const Markdown = memo(MarkdownImpl);

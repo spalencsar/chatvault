@@ -9,12 +9,13 @@ import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
 import { fmtDate, fmtSize } from "@/chat-actions";
 import { startBulkExport, useBulkExport } from "@/bulk-export";
+import { AUTO_SYNC_KEY } from "@/store";
 
 type Status = { path: string; exists: boolean; files: number; bytes: number; lastSyncMs: number | null };
 type Stats = { copied: number; skipped: number; failed: number; bytes: number; total: number };
 type Prog = { phase: string; done: number; total: number; current: string };
 
-export const AUTO_SYNC_KEY = "chatvault.autoSync";
+export { AUTO_SYNC_KEY } from "@/store";
 
 export function SyncDialog({
   open,

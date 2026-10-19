@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { memo } from "react";
+import { useStickyOpen } from "@/sticky-open";
 import { Bot, Brain, CircleCheck, CircleDashed, Circle, Globe, ListTodo, Terminal as TerminalIcon, Wrench, ArrowUpRight } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { CodeBlock, CodeBlockContent } from "@/components/ui/code-block";
 import { Trace, TraceCollapsible, TraceCollapsibleContent, TraceCollapsibleTrigger, TraceDescription, TraceIcon, TraceLine, TraceTitle } from "@/components/ui/trace";
 import { isFilePath, useFileView } from "@/file-viewer";
 import { Highlight, textHas } from "@/highlight";
+import { ColoredOutput, ShellLine, guessLanguage } from "@/shell-highlight";
 import { hostname, uniqueUrls } from "@/ai-elements";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { Msg } from "@/chat-actions";
@@ -48,14 +50,15 @@ function planSteps(m: Item): PlanStep[] {
 }
 
 /** The task list or plan the AI kept, with how far it got. */
-export function PlanBlock({ item }: { item: Item }) {
+export function PlanBlock({ item, memoKey }: { item: Item; memoKey?: string }) {
+  const [open, setOpen] = useStickyOpen(memoKey, true);
   const steps = planSteps(item);
   if (!steps.length) return null;
   const done = steps.filter((s) => s.status === "done").length;
   const running = steps.some((s) => s.status === "running");
   return (
     <Trace className="pl-11">
-      <TraceCollapsible defaultOpen>
+      <TraceCollapsible open={open} onOpenChange={setOpen}>
         <TraceCollapsibleTrigger>
           <TraceLine status={running ? "running" : undefined}>
             <TraceIcon>
@@ -83,13 +86,14 @@ export function PlanBlock({ item }: { item: Item }) {
 }
 
 /** A sub-agent run: what it was asked and what it reported back. */
-export function SubagentBlock({ item }: { item: Item }) {
+export function SubagentBlock({ item, memoKey }: { item: Item; memoKey?: string }) {
+  const [open, setOpen] = useStickyOpen(memoKey);
   const d = data(item);
   const title = str(d.description) || "Sub-agent";
   const kind = str(d.subagent_type);
   return (
     <Trace className="pl-11">
-      <TraceCollapsible>
+      <TraceCollapsible open={open} onOpenChange={setOpen}>
         <TraceCollapsibleTrigger>
           <TraceLine status={item.result?.error ? "error" : undefined}>
             <TraceIcon>
@@ -121,8 +125,8 @@ export function SubagentBlock({ item }: { item: Item }) {
 }
 
 /** One tool step inside an expanded group. */
-export function StepItem({ item, q }: { item: Item; q: string }) {
-  const [open, setOpen] = useState(false);
+export const StepItem = memo(function StepItem({ item, q, memoKey }: { item: Item; q: string; memoKey?: string }) {
+  const [open, setOpen] = useStickyOpen(memoKey);
   const files = useFileView();
   const [name, detail] = splitText(item.text);
   const d0 = data(item);
@@ -140,8 +144,8 @@ export function StepItem({ item, q }: { item: Item; q: string }) {
               <TraceTitle>Thought</TraceTitle>
             </TraceLine>
           </TraceCollapsibleTrigger>
-          <TraceCollapsibleContent className="whitespace-pre-wrap">
-            <Highlight text={item.text} q={q} activeMark={false} />
+          <TraceCollapsibleContent className="whitespace-pre-wrap text-sm">
+            <Highlight text={item.text.trim()} q={q} activeMark={false} />
           </TraceCollapsibleContent>
         </TraceCollapsible>
       </Trace>
@@ -161,14 +165,19 @@ export function StepItem({ item, q }: { item: Item; q: string }) {
                 <TerminalIcon />
               </TraceIcon>
               <TraceTitle className="truncate font-mono text-xs">
-                Ran <Highlight text={clipText(cmd.split("\n")[0], 90)} q={q} activeMark={false} />
+                Ran <ShellLine text={clipText(cmd.split("\n")[0], 90)} q={q} />
               </TraceTitle>
             </TraceLine>
           </TraceCollapsibleTrigger>
           <TraceCollapsibleContent>
             <CodeBlock size="sm">
-              <CodeBlockContent data-lenis-prevent wrap className="max-h-64">
-                {`$ ${cmd}${out ? `\n${out}` : ""}`}
+              <CodeBlockContent data-lenis-prevent className="max-h-64">
+                <span>
+                  <span className="text-muted-foreground">$ </span>
+                  <ShellLine text={cmd} />
+                  {out ? "\n" : null}
+                  {out ? <ColoredOutput code={out} language={guessLanguage(cmd)} /> : null}
+                </span>
               </CodeBlockContent>
             </CodeBlock>
           </TraceCollapsibleContent>
@@ -247,4 +256,4 @@ export function StepItem({ item, q }: { item: Item; q: string }) {
       </TraceLine>
     </Trace>
   );
-}
+});

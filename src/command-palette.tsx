@@ -85,7 +85,7 @@ export function CommandPalette({
           {results.length > 0 && (
             <>
               {shownPinned.length > 0 && <CommandSeparator />}
-              <CommandGroup heading={q ? "Chats" : "Recent chats"}>{results.filter((c) => !shownPinned.some((p) => p.id === c.id && p.provider === c.provider)).map(item)}</CommandGroup>
+              <CommandGroup heading={q ? "Chats" : "Recent chats"}>{results.filter((c) => !shownPinned.some((p) => p.id === c.id && p.provider === c.provider)).slice(0, q ? 12 : 5).map(item)}</CommandGroup>
             </>
           )}
           {shownActions.length > 0 && (

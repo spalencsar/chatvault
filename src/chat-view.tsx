@@ -1,8 +1,8 @@
 import { FileViewContext, FileViewer, isFilePath } from "@/file-viewer";
+import { StickyOpenContext, useStickyOpen } from "@/sticky-open";
 import { ChatImage, GalleryContext, Lightbox } from "@/image-viewer";
-import { animateScroll } from "react-scroll";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, memo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import {
   ExternalLink,
   Save,
@@ -61,8 +61,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import Lenis from "lenis";
-import "lenis/dist/lenis.css";
 import { cn } from "@/lib/utils";
 import { ProviderLogo } from "@/claude-logo";
 import { MessageBody } from "@/message-body";
@@ -146,25 +144,10 @@ export function ChatView(p: Props) {
   const shown = useMemo(() => merged.filter((m) => p.showSteps || (m.kind !== "tool" && m.kind !== "reasoning")), [merged, p.showSteps]);
   const viewport = useCallback(() => wrapRef.current?.querySelector<HTMLElement>("[data-slot=scroll-area-viewport]") ?? null, []);
 
-  // Smooth, eased wheel and touch scrolling for the message list.
-  const lenisRef = useRef<Lenis | null>(null);
   const ready = page !== null;
-  useEffect(() => {
-    const el = viewport();
-    const content = el?.firstElementChild as HTMLElement | null | undefined;
-    if (!el || !content || !ready) return;
-    const lenis = new Lenis({ wrapper: el, content, duration: 1, wheelMultiplier: 0.9, touchMultiplier: 1.2, smoothWheel: true });
-    lenisRef.current = lenis;
-    let id = requestAnimationFrame(function loop(time) {
-      lenis.raf(time);
-      id = requestAnimationFrame(loop);
-    });
-    return () => {
-      cancelAnimationFrame(id);
-      lenis.destroy();
-      lenisRef.current = null;
-    };
-  }, [viewport, chat.id, ready]);
+  const userTick = useRef(0);
+  const firstRequested = useRef(false);
+  const pending = useRef<string | null>(null);
 
   // Consecutive tool steps collapse into one Trace.
   const blocks = useMemo(() => {
@@ -202,152 +185,89 @@ export function ChatView(p: Props) {
     return out;
   }, [blocks]);
 
+  // A first guess for the height of a row from its text, so rows measured later move the page as little as possible.
+  const estimate = (i: number) => {
+    const b = blocks[i];
+    if (!b) return 90;
+    if (b.kind === "trace") return 36;
+    if (b.kind !== "msg") return 90;
+    const t = b.m.text;
+    let lines = 0;
+    for (let at = 0; at < t.length; ) {
+      const nl = t.indexOf("\n", at);
+      const end = nl < 0 ? t.length : nl;
+      lines += Math.max(1, Math.ceil((end - at) / 80));
+      if (nl < 0) break;
+      at = nl + 1;
+      if (lines > 60) break;
+    }
+    return Math.min(1100, 52 + Math.min(lines, 60) * 24);
+  };
+
+  const openMemo = useMemo(() => new Map<string, boolean>(), [chat.id]);
+
   const virt = useVirtualizer({
     count: blocks.length,
     getScrollElement: viewport,
-    estimateSize: (i) => (blocks[i]?.kind === "trace" ? 36 : blocks[i]?.kind === "msg" ? 150 : 90),
-    overscan: 6,
+    estimateSize: estimate,
+    overscan: 8,
     scrollMargin: margin,
     getItemKey: (i) => keys[i] ?? i,
-    useAnimationFrameWithResizeObserver: true,
+    // Messages added above keep the row at the top of the screen where it is, in the same render, not a frame later.
+    anchorTo: "end",
+    followOnAppend: true,
+    scrollEndThreshold: 80,
+    scrollPaddingStart: 16,
   });
-  // Keep the message you are reading in the same place when messages are added above it.
-  const lastAnchor = useRef<{ key: string; delta: number } | null>(null);
-  const pinning = useRef(false);
-  useLayoutEffect(() => {
-    const a = lastAnchor.current;
-    const el = viewport();
-    if (a && el && !pinning.current) {
-      const idx = keys.indexOf(a.key);
-      const off = idx >= 0 ? virt.getOffsetForIndex(idx, "start") : null;
-      if (off) {
-        const want = off[0] - a.delta;
-        if (Math.abs(want - el.scrollTop) > 2) {
-          lenisRef.current?.scrollTo(want, { immediate: true, force: true });
-          el.scrollTop = want;
-        }
-      }
-    }
-  }, [keys, virt, viewport]);
-  useLayoutEffect(() => {
-    const el = viewport();
-    const v0 = virt.getVirtualItems()[0];
-    lastAnchor.current = el && v0 ? { key: String(v0.key), delta: v0.start - el.scrollTop } : null;
-  });
-  // New messages that arrive while you are reading at the bottom are followed; if you scrolled up, your place is kept.
-  /** Animated scroll with react-scroll. Lenis steps aside while it runs so the two never fight. */
-  const SCROLL_ID = "chatvault-messages";
-  const animateTo = useCallback(
-    (y: number, ms: number, done?: () => void) => {
-      const el = viewport();
-      if (!el) return;
-      el.id = SCROLL_ID;
-      lenisRef.current?.stop();
-      animateScroll.scrollTo(Math.max(0, y), { containerId: SCROLL_ID, duration: ms, smooth: "easeInOutCubic" });
-      window.setTimeout(() => {
-        lenisRef.current?.start();
-        done?.();
-      }, ms + 40);
-    },
-    [viewport],
-  );
-  const jumpNow = useCallback(
-    (y: number) => {
-      const el = viewport();
-      if (!el) return;
-      lenisRef.current?.scrollTo(y, { immediate: true, force: true });
-      el.scrollTop = y;
-    },
-    [viewport],
-  );
-
-  const nearBottom = useRef(true);
+  // The browser owns wheel/touch movement; the virtualizer owns anchoring and navigation.
+  // Cancel its pending navigation as soon as the reader takes over.
   useEffect(() => {
-    if (!nearBottom.current) return;
-    const id = requestAnimationFrame(() => {
-      const el = viewport();
-      if (!el) return;
-      animateTo(el.scrollHeight, 600);
-    });
-    return () => cancelAnimationFrame(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page?.total, p.live]);
-  // A chat opens at its latest message. Row heights settle as they are measured and earlier messages load above,
-  // so the view stays pinned to the bottom until everything has settled, or until you scroll yourself.
-  const partialNow = useRef(false);
-  partialNow.current = !!page?.partial;
-  useLayoutEffect(() => {
-    if (!ready) return;
     const el = viewport();
     if (!el) return;
-    let stop = false;
-    let lastSH = 0;
-    let changed = performance.now();
-    pinning.current = true;
-    const hardEnd = performance.now() + 30000;
     const cancel = () => {
-      stop = true;
-      pinning.current = false;
+      userTick.current++;
+      firstRequested.current = false;
+      pending.current = null;
+      virt.cancelScroll();
     };
-    const evs = ["wheel", "touchstart", "keydown", "pointerdown"] as const;
-    evs.forEach((e) => el.addEventListener(e, cancel, { passive: true, once: true }));
-    const tick = () => {
-      if (stop) return;
-      const now = performance.now();
-      // Done once the full page is in and the content height has stopped changing.
-      if (el.scrollHeight !== lastSH) {
-        lastSH = el.scrollHeight;
-        changed = now;
-      }
-      if (!partialNow.current && now - changed > 700) {
-        pinning.current = false;
-        return;
-      }
-      if (now > hardEnd) {
-        pinning.current = false;
-        return;
-      }
-      el.scrollTop = el.scrollHeight;
-      requestAnimationFrame(tick);
-    };
-    tick();
-    return () => {
-      stop = true;
-      pinning.current = false;
-      evs.forEach((e) => el.removeEventListener(e, cancel));
-    };
-  }, [ready, chat.id, viewport]);
-  useLayoutEffect(() => setMargin(listRef.current?.offsetTop ?? 0), [page?.start, ready]);
+    const events = ["wheel", "touchstart", "keydown", "pointerdown"] as const;
+    events.forEach((event) => el.addEventListener(event, cancel, { passive: true }));
+    return () => events.forEach((event) => el.removeEventListener(event, cancel));
+  }, [viewport, virt]);
 
-  /** Scrolls a message into place with the wheel's easing. Rows are measured as they appear, so it settles on the exact spot at the end. */
+  useLayoutEffect(() => {
+    if (ready) virt.scrollToEnd();
+  }, [ready, chat.id, virt]);
+
+  // Loading indicators above the list can change without page.start changing.
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const update = () => setMargin(list.offsetTop);
+    update();
+    const observer = new ResizeObserver(update);
+    if (list.parentElement) observer.observe(list.parentElement);
+    return () => observer.disconnect();
+  }, [ready, page?.start, page?.partial]);
+
+  useLayoutEffect(() => {
+    if (firstRequested.current && page?.start === 0 && !page.partial) {
+      firstRequested.current = false;
+      virt.scrollToOffset(0);
+    }
+  }, [page, virt]);
+
   const goTo = useCallback(
     (shownIdx: number, align: "start" | "center", instant = false) => {
-      const el = viewport();
       const bi = blockOf[shownIdx];
-      if (!el || bi === undefined) return;
-      const spot = () => {
-        const r = virt.getOffsetForIndex(bi, align === "center" ? "center" : "start");
-        return Math.max(0, (r ? r[0] : 0) - (align === "center" ? 0 : 16));
-      };
-      const target = spot();
-      if (instant) {
-        // Straight there, then re-check as the rows around it are measured.
-        jumpNow(target);
-        requestAnimationFrame(() => jumpNow(spot()));
-        window.setTimeout(() => jumpNow(spot()), 120);
-        window.setTimeout(() => jumpNow(spot()), 320);
-        return;
-      }
-      const dist = target - el.scrollTop;
-      // A long way off first hops to just short of the spot, then glides in, so it never sweeps through thousands of rows.
-      if (Math.abs(dist) > el.clientHeight * 2.5) jumpNow(Math.max(0, target - Math.sign(dist) * el.clientHeight * 1.2));
-      const settle = (tries: number) => {
-        const t = spot();
-        if (Math.abs(t - el.scrollTop) > 6 && tries > 0) animateTo(t, 250, () => settle(tries - 1));
-      };
-      animateTo(target, 800, () => settle(2));
+      const el = viewport();
+      if (bi === undefined || !el) return;
+      const target = virt.getOffsetForIndex(bi, align)?.[0] ?? el.scrollTop;
+      // Distant navigation should not animate through thousands of unmeasured messages.
+      const distant = Math.abs(target - el.scrollTop) > el.clientHeight * 2.5;
+      virt.scrollToIndex(bi, { align, behavior: instant || distant ? "auto" : "smooth" });
     },
-    [viewport, blockOf, virt, animateTo, jumpNow],
+    [blockOf, viewport, virt],
   );
 
   const images = useMemo(() => shown.filter((m) => m.kind === "image" && typeof m.data === "string").map((m) => m.data as string), [shown]);
@@ -364,11 +284,18 @@ export function ChatView(p: Props) {
     return out;
   }, [shown, query]);
   const matchIndex = matches.length ? Math.min(cur, matches.length - 1) : -1;
+  const lastSearchJump = useRef<string | null>(null);
   useEffect(() => setCur(0), [query, chat.id]);
   useEffect(() => {
-    if (matchIndex < 0) return;
+    if (matchIndex < 0) {
+      lastSearchJump.current = null;
+      return;
+    }
+    const target = `${query}|${matchIndex}|${keys[blockOf[matches[matchIndex]]]}`;
+    if (lastSearchJump.current === target) return;
+    lastSearchJump.current = target;
     goTo(matches[matchIndex], "center");
-  }, [matchIndex, matches, goTo]);
+  }, [query, matchIndex, matches, keys, blockOf, goTo]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -384,8 +311,6 @@ export function ChatView(p: Props) {
   }, []);
 
   useEffect(() => {
-    const el = viewport();
-    if (el) el.scrollTop = 0;
     setSearchOpen(false);
     setQ("");
   }, [chat.id, viewport]);
@@ -399,10 +324,9 @@ export function ChatView(p: Props) {
     let raf = 0;
     const onScroll = () => {
       // Near the top of what is loaded, the next earlier messages are read; the view stays where it is.
-      if (live.current.start > 0 && !live.current.loading && !live.current.partial && !pinning.current && el.scrollTop - margin < 60) live.current.loadEarlier();
+      if (live.current.start > 0 && !live.current.loading && !live.current.partial && el.scrollTop - margin < 1800) live.current.loadEarlier();
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
-        nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 240;
         setShowJump(el.scrollHeight - el.scrollTop - el.clientHeight > 400);
         setAtTop(el.scrollTop < 8);
         setAtEnd(el.scrollHeight - el.scrollTop - el.clientHeight < 8);
@@ -467,7 +391,22 @@ export function ChatView(p: Props) {
   }, [ticks, p.outline]);
   const step = Math.max(1, Math.ceil(barTicks.length / 60));
   const sampled = barTicks.filter((t, n) => n % step === 0 || (t.loaded && t.k === activeTick));
-  const pending = useRef<string | null>(null);
+  /** The first message of the chat: reads every earlier message first when only the latest are loaded. */
+  const goToFirst = async () => {
+    firstRequested.current = true;
+    const tick = userTick.current;
+    if ((page?.start ?? 0) > 0) {
+      try {
+        if (p.onLoadUntil) await p.onLoadUntil("1970-01-01T00:00:00Z");
+        else await p.onLoadAll();
+      } catch {
+        firstRequested.current = false;
+      }
+    } else if (userTick.current === tick) {
+      firstRequested.current = false;
+      virt.scrollToOffset(0);
+    }
+  };
   useEffect(() => {
     const key = pending.current;
     if (!key) return;
@@ -533,14 +472,13 @@ export function ChatView(p: Props) {
       { type: "item", label: "Search in this chat", icon: <Search strokeWidth={1.5} />, onSelect: () => setSearchOpen(true) },
       { type: "item", label: p.showSteps ? "Hide the AI's steps" : "Show the AI's steps", icon: <ListTree strokeWidth={1.5} />, onSelect: p.onToggleSteps },
     );
-    const el = viewport();
     out.push({
       type: "sub",
       label: "Go to",
       icon: <ArrowDown strokeWidth={1.5} />,
       entries: [
-        { type: "item", label: "First message", icon: <ArrowUp strokeWidth={1.5} />, onSelect: () => el?.scrollTo({ top: 0 }) },
-        { type: "item", label: "Latest message", icon: <ArrowDown strokeWidth={1.5} />, onSelect: () => jumpNow(el?.scrollHeight ?? 0) },
+        { type: "item", label: "First message", icon: <ArrowUp strokeWidth={1.5} />, onSelect: () => void goToFirst() },
+        { type: "item", label: "Latest message", icon: <ArrowDown strokeWidth={1.5} />, onSelect: () => virt.scrollToEnd() },
         ...(p.onOverview ? ([{ type: "sep" }, { type: "item", label: "Back to Home", icon: <LayoutDashboard strokeWidth={1.5} />, onSelect: p.onOverview }] as Entry[]) : []),
       ],
     });
@@ -587,6 +525,7 @@ export function ChatView(p: Props) {
   return (
     <GalleryContext.Provider value={gallery}>
     <FileViewContext.Provider value={fileCtx}>
+    <StickyOpenContext.Provider value={openMemo}>
     <ContextArea className="flex min-h-0 flex-1 flex-col" entries={menuEntries} onError={(e) => p.toast(String(e))}>
     <div className="flex min-h-0 flex-1 flex-col">
       {viewer !== null && <Lightbox images={images} index={Math.min(viewer, images.length - 1)} onIndex={setViewer} onClose={() => setViewer(null)} />}
@@ -698,7 +637,7 @@ export function ChatView(p: Props) {
           </div>
         )}
 
-        <ScrollArea className="h-full">
+        <ScrollArea className="h-full" viewportClassName="[overflow-anchor:none]">
           {!page ? (
             <MessagesSkeleton />
           ) : (
@@ -723,13 +662,13 @@ export function ChatView(p: Props) {
                   return (
                     <div key={vi.key} data-index={vi.index} ref={virt.measureElement} className="absolute left-0 top-0 w-full pb-7" style={{ transform: `translateY(${vi.start - margin}px)` }}>
                       {b.kind === "plan" ? (
-                        <PlanBlock item={b.m} />
+                        <PlanBlock item={b.m} memoKey={String(vi.key)} />
                       ) : b.kind === "agent" ? (
-                        <SubagentBlock item={b.m} />
+                        <SubagentBlock item={b.m} memoKey={String(vi.key)} />
                       ) : b.kind === "trace" ? (
-                        <StepsTrace items={b.items} q={query} />
+                        <StepsTrace items={b.items} q={query} rowKey={String(vi.key)} />
                       ) : (
-                        <MessageRow m={b.m} provider={chat.provider} q={query} isCurrentMatch={matchIndex >= 0 && matches[matchIndex] === b.i} toast={p.toast} />
+                        <MessageRow m={b.m} provider={chat.provider} q={query} isCurrentMatch={matchIndex >= 0 && matches[matchIndex] === b.i} toast={p.toast} rowKey={String(vi.key)} />
                       )}
                     </div>
                   );
@@ -781,14 +720,7 @@ export function ChatView(p: Props) {
             size="icon"
             aria-label="Scroll to the bottom"
             className="absolute bottom-4 left-1/2 z-20 size-9 -translate-x-1/2 rounded-full shadow-md"
-            onClick={() => {
-              const el = viewport();
-              if (!el) return;
-              // Straight to the end, then once more as the last rows are measured.
-              jumpNow(el.scrollHeight);
-              requestAnimationFrame(() => jumpNow(el.scrollHeight));
-              window.setTimeout(() => jumpNow(el.scrollHeight), 120);
-            }}
+            onClick={() => virt.scrollToEnd()}
           >
             <ArrowDown className="size-4" />
           </Button>
@@ -797,6 +729,7 @@ export function ChatView(p: Props) {
     </div>
       <FileViewer path={fileOpen} base={chat.cwd ?? null} hints={fileHints} onClose={() => setFileOpen(null)} />
     </ContextArea>
+    </StickyOpenContext.Provider>
     </FileViewContext.Provider>
     </GalleryContext.Provider>
   );
@@ -913,8 +846,8 @@ function ActionsMenu({ chat, msgs, toast, onRename, onDelete, pinned, onTogglePi
 }
 
 /** A run of tool steps, collapsed to one line with the shadcn Trace. */
-function StepsTrace({ items, q }: { items: { i: number; m: Item }[]; q: string }) {
-  const [open, setOpen] = useState(false);
+const StepsTrace = memo(function StepsTrace({ items, q, rowKey }: { items: { i: number; m: Item }[]; q: string; rowKey: string }) {
+  const [open, setOpen] = useStickyOpen(rowKey);
   const hasMatch = !!q && items.some((t) => textHas(t.m.text, q));
   const names = Array.from(new Set(items.map((t) => stepName(t.m))));
   return (
@@ -934,17 +867,17 @@ function StepsTrace({ items, q }: { items: { i: number; m: Item }[]; q: string }
         <TraceCollapsibleContent>
           <div className="space-y-1.5">
             {items.map(({ i, m }) => (
-              <StepItem key={i} item={m} q={q} />
+              <StepItem key={i} item={m} q={q} memoKey={`${rowKey}|${m.id ?? m.ts ?? i}`} />
             ))}
           </div>
         </TraceCollapsibleContent>
       </TraceCollapsible>
     </Trace>
   );
-}
+});
 
-function MessageRow({ m, provider, q, isCurrentMatch, toast }: { m: Msg; provider: Provider; q: string; isCurrentMatch: boolean; toast: (m: string) => void }) {
-  const [open, setOpen] = useState(false);
+const MessageRow = memo(function MessageRow({ m, provider, q, isCurrentMatch, toast, rowKey }: { m: Msg; provider: Provider; q: string; isCurrentMatch: boolean; toast: (m: string) => void; rowKey: string }) {
+  const [open, setOpen] = useStickyOpen(rowKey);
   const [copied, setCopied] = useState<string | null>(null);
   const time = m.ts ? new Date(m.ts).toLocaleTimeString(undefined, { timeStyle: "short" }) : "";
   const isUser = m.role === "user";
@@ -1023,7 +956,8 @@ function MessageRow({ m, provider, q, isCurrentMatch, toast }: { m: Msg; provide
       </MessageContent>
     </Message>
   );
-}
+  // The toast callback changes identity on every render; it is deliberately left out so rows are not redrawn while scrolling.
+}, (a, b) => a.m === b.m && a.provider === b.provider && a.q === b.q && a.isCurrentMatch === b.isCurrentMatch && a.rowKey === b.rowKey);
 
 function MiniAction({ label, onClick, children }: { label: string; onClick: () => void; children: ReactNode }) {
   return (

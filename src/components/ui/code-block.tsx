@@ -158,7 +158,8 @@ function CodeBlockContent({
       style={{ counterReset: `line ${startLine - 1}`, ...style }}
       className={cn(
         "min-h-0 w-max min-w-full px-3 py-3 text-start font-mono leading-relaxed outline-none group-has-data-[slot=code-block-footer]/code-block:pb-2 group-has-data-[slot=code-block-header]/code-block:pt-2 group-data-[size=sm]/code-block:px-2.5 group-data-[size=sm]/code-block:py-2.5 group-data-[size=sm]/code-block:group-has-data-[slot=code-block-header]/code-block:pt-1.5 data-wrap:w-full data-wrap:wrap-break-word data-wrap:whitespace-pre-wrap",
-        className
+        className,
+        wrap && "overflow-auto"
       )}
       {...props}
     >

@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
+import { lazy, Suspense, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -51,10 +51,7 @@ import { Badge } from "@/components/ui/badge";
 import { ActionIcon } from "@/action-icon";
 import { ChatCard } from "@/chat-card";
 import { CORE_PROVIDERS, PROVIDERS, type Tool, PROVIDER_NAME, isHandoffOnly, accountLabel, chatActions, continueTargets, COPY_CONTENT_IDS, prettyProject, setAccountNames, type AccountInfo, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
-import { ChatView } from "@/chat-view";
 import { FadedScroll } from "@/faded-scroll";
-import { OverviewPage } from "@/overview";
-import { CommandPalette } from "@/command-palette";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -67,14 +64,20 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { SidebarSkeleton } from "@/skeletons";
+import { SidebarSkeleton, MessagesSkeleton } from "@/skeletons";
 import { Splash } from "@/splash";
-import { GlobalSearch } from "@/global-search";
-import { TagsDialog } from "@/tags-dialog";
 import { TitleBar } from "@/titlebar";
-import { AUTO_SYNC_KEY, SyncDialog } from "@/sync-dialog";
+import { AUTO_SYNC_KEY } from "@/store";
 import { chatKey, useChatMeta, usePersisted } from "@/store";
 import { startAutoUpdate } from "@/updater";
+
+// Keep the shell independent of chat rendering, charts and closed dialogs.
+const ChatView = lazy(() => import("@/chat-view").then((m) => ({ default: m.ChatView })));
+const OverviewPage = lazy(() => import("@/overview").then((m) => ({ default: m.OverviewPage })));
+const CommandPalette = lazy(() => import("@/command-palette").then((m) => ({ default: m.CommandPalette })));
+const GlobalSearch = lazy(() => import("@/global-search").then((m) => ({ default: m.GlobalSearch })));
+const TagsDialog = lazy(() => import("@/tags-dialog").then((m) => ({ default: m.TagsDialog })));
+const SyncDialog = lazy(() => import("@/sync-dialog").then((m) => ({ default: m.SyncDialog })));
 
 const PAGE_SIZE = 20;
 const MSG_PAGE = 80;
@@ -117,12 +120,11 @@ export default function App() {
   }, []);
   const [tagging, setTagging] = useState<Chat | null>(null);
   const [tagList, setTagList] = useState<[string, number][]>([]);
-  // The start screen stays for at least a moment, then fades once the first list is in.
+  // The HTML boot screen covers module loading; hand over to the shell on its first frame.
   const [splash, setSplash] = useState<"on" | "leaving" | "off">("on");
-  const bootAt = useRef(Date.now());
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    initBulkExport();
+    if (isTauri) initBulkExport();
   }, []);
   // A failed scan or query used to disappear silently; it now shows as an error toast.
   useEffect(() => {
@@ -133,7 +135,14 @@ export default function App() {
   const [reloadKey, setReloadKey] = useState(0);
   const [indexing, setIndexing] = useState<IndexProg | null>(null);
   const [selected, setSelected] = useState<Chat | null>(null);
-  const [page, setPage] = useState<MsgPage | null>(null);
+  const [page, setPageState] = useState<MsgPage | null>(null);
+  const pageRef = useRef<MsgPage | null>(null);
+  // Async readers and live updates see the same page before React's next render.
+  const setPage = useCallback((next: MsgPage | null | ((current: MsgPage | null) => MsgPage | null)) => {
+    const value = typeof next === "function" ? next(pageRef.current) : next;
+    pageRef.current = value;
+    setPageState(value);
+  }, []);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
   const [renaming, setRenaming] = useState<Chat | null>(null);
@@ -204,11 +213,16 @@ export default function App() {
   useEffect(() => {
     if (!isTauri) return;
     const un = listen<IndexProg>("index-progress", (e) => setIndexing(e.payload.phase === "Done" ? null : e.payload));
-    void (async () => {
-      // Backing up is on unless you turned it off: once at start, then every 10 minutes while ChatVault is open.
-      if (localStorage.getItem(AUTO_SYNC_KEY) !== "0") await invoke("sync_chats").catch(() => {});
-      await rescan();
-    })();
+    let cancelled = false;
+    // Paint cached chats first; StrictMode cleanup cancels the first scheduled run.
+    const startup = window.setTimeout(() => {
+      void (async () => {
+        await rescan();
+        if (cancelled || localStorage.getItem(AUTO_SYNC_KEY) === "0") return;
+        const result = await invoke<{ copied: number }>("sync_chats").catch(() => null);
+        if (!cancelled && result && result.copied > 0) await rescan();
+      })();
+    }, 750);
     const every = window.setInterval(() => {
       if (localStorage.getItem(AUTO_SYNC_KEY) !== "0") void invoke("sync_chats").then(() => rescan()).catch(() => {});
     }, 10 * 60 * 1000);
@@ -216,6 +230,8 @@ export default function App() {
     const offSync = listen("tray-sync", () => setSyncOpen(true));
     const offScan = listen("tray-rescan", () => void rescan());
     return () => {
+      cancelled = true;
+      window.clearTimeout(startup);
       void un.then((f) => f());
       void offSync.then((f) => f());
       void offScan.then((f) => f());
@@ -319,13 +335,16 @@ export default function App() {
   }, [q, searchingAll, reloadKey]);
 
   useEffect(() => {
-    if (splash !== "on" || (isTauri && (loadingList || indexing))) return;
-    const t = window.setTimeout(() => {
+    let timer: number | undefined;
+    const frame = requestAnimationFrame(() => {
       setSplash("leaving");
-      window.setTimeout(() => setSplash("off"), 320);
-    }, Math.max(0, 900 - (Date.now() - bootAt.current)));
-    return () => window.clearTimeout(t);
-  }, [splash, loadingList, indexing]);
+      timer = window.setTimeout(() => setSplash("off"), 320);
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+    };
+  }, []);
 
   const loadingMore = useRef(false);
   const loadMore = useCallback(async () => {
@@ -502,8 +521,6 @@ export default function App() {
 
   const stamp = useRef("");
   const [live, setLive] = useState(false);
-  const pageRef = useRef(page);
-  pageRef.current = page;
   const selRef = useRef(selected);
   selRef.current = selected;
   useEffect(() => {
@@ -566,66 +583,67 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [selected?.id, selected?.provider, selected?.path]);
 
+  // Serialize history reads so scroll, timeline and search cannot replace one another's pages.
+  const historyQueue = useRef<Promise<void>>(Promise.resolve());
+  const earlierBusy = useRef(false);
+  const queueHistory = (work: (chat: Chat, valid: () => boolean) => Promise<void>) => {
+    const chat = selRef.current;
+    const generation = openId.current;
+    const valid = () => !!chat && openId.current === generation && selRef.current?.id === chat.id && selRef.current?.provider === chat.provider && selRef.current?.path === chat.path;
+    const job = historyQueue.current.then(async () => {
+      if (chat && valid()) await work(chat, valid);
+    });
+    historyQueue.current = job.catch(() => {});
+    return job;
+  };
+  const prependEarlier = (r: MsgPage, from: number) => {
+    setPage((cur) => {
+      if (!cur || cur.start !== from) return cur;
+      return { ...cur, messages: [...r.messages, ...cur.messages], total: Math.max(r.total, cur.total), start: r.start };
+    });
+  };
   const loadEarlier = async () => {
-    if (!selected || !page || page.start === 0) return;
+    if (earlierBusy.current) return;
+    earlierBusy.current = true;
     setLoadingEarlier(true);
     try {
-      const r = await invoke<MsgPage>("read_chat_page", { provider: selected.provider, path: selected.path, before: page.start, limit: 200 });
-      setPage({ messages: [...r.messages, ...page.messages], total: r.total, start: r.start });
+      await queueHistory(async (chat, valid) => {
+        const cur = pageRef.current;
+        if (!cur || cur.partial || cur.start === 0) return;
+        const r = await invoke<MsgPage>("read_chat_page", { provider: chat.provider, path: chat.path, before: cur.start, limit: 120 });
+        if (valid()) prependEarlier(r, cur.start);
+      });
     } catch (e) {
       say(String(e));
     } finally {
+      earlierBusy.current = false;
       setLoadingEarlier(false);
     }
   };
-  /** Reads earlier messages until the one sent at `ts` is loaded, so a tick far up the timeline can be opened. */
-  const untilBusy = useRef(false);
-  const untilWant = useRef<string | null>(null);
-  const loadUntil = async (ts: string) => {
-    // One quiet load at a time; if you hover a tick further up meanwhile, it carries on to that one.
-    if (untilBusy.current) {
-      if (!untilWant.current || Date.parse(ts) < Date.parse(untilWant.current)) untilWant.current = ts;
-      return;
+  const loadHistoryTo = (target: number, limit: number) => queueHistory(async (chat, valid) => {
+    while (valid()) {
+      const cur = pageRef.current;
+      if (!cur || cur.partial || cur.start === 0) return;
+      const oldest = cur.messages.find((m) => m.ts)?.ts;
+      if (oldest && Date.parse(oldest) <= target) return;
+      const r = await invoke<MsgPage>("read_chat_page", { provider: chat.provider, path: chat.path, before: cur.start, limit });
+      if (!valid()) return;
+      if (r.start >= cur.start) throw new Error("Earlier messages could not be loaded. Please refresh this chat.");
+      prependEarlier(r, cur.start);
     }
-    const sel = selRef.current;
-    if (!sel || !pageRef.current) return;
-    untilBusy.current = true;
-    let target = Date.parse(ts);
+  });
+  const loadUntil = async (ts: string) => {
     try {
-      for (;;) {
-        const first = pageRef.current;
-        if (!first) break;
-        let cur: MsgPage = first;
-        while (cur.start > 0) {
-          const oldest = cur.messages.find((m) => m.ts)?.ts;
-          if (oldest && Date.parse(oldest) <= target) break;
-          const r = await invoke<MsgPage>("read_chat_page", { provider: sel.provider, path: sel.path, before: cur.start, limit: 400 });
-          if (selRef.current?.id !== sel.id) return;
-          cur = { messages: [...r.messages, ...cur.messages], total: r.total, start: r.start };
-          pageRef.current = cur;
-          setPage(cur);
-        }
-        if (untilWant.current && Date.parse(untilWant.current) < target) {
-          target = Date.parse(untilWant.current);
-          untilWant.current = null;
-          continue;
-        }
-        break;
-      }
+      await loadHistoryTo(Date.parse(ts), 400);
     } catch (e) {
       say(String(e));
-    } finally {
-      untilBusy.current = false;
-      untilWant.current = null;
     }
   };
   const loadAll = async () => {
-    if (!selected || !page) return;
-    let cur = page;
-    while (cur.start > 0) {
-      const r = await invoke<MsgPage>("read_chat_page", { provider: selected.provider, path: selected.path, before: cur.start, limit: 2000 });
-      cur = { messages: [...r.messages, ...cur.messages], total: r.total, start: r.start };
-      setPage(cur);
+    try {
+      await loadHistoryTo(Number.NEGATIVE_INFINITY, 2000);
+    } catch (e) {
+      say(String(e));
     }
   };
 
@@ -951,6 +969,7 @@ export default function App() {
         <div className="flex min-w-0 flex-1 flex-col">
         <TitleBar title={selected ? `${PROVIDER_NAME[selected.provider]} / ${prettyProject(selected.project)}` : undefined} actions={selected ? controls : undefined} sidebarOpen={sidebarOpen} busy={!!indexing} dark={dark} onRefresh={rescan} onTheme={() => setDark((d) => !d)} />
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <Suspense fallback={<MessagesSkeleton />}>
           {searchAll ? (
             <GlobalSearch
               key={searchSeed}
@@ -987,6 +1006,7 @@ export default function App() {
             />
           ) : (
             <ChatView
+              key={chatKey(selected)}
               chat={named(selected)}
               page={page}
               loadingEarlier={loadingEarlier}
@@ -1010,10 +1030,12 @@ export default function App() {
               toast={say}
             />
           )}
+          </Suspense>
         </main>
         </div>
 
-        <CommandPalette
+        <Suspense fallback={null}>
+        {paletteOpen && <CommandPalette
           open={paletteOpen}
           onOpenChange={setPaletteOpen}
           provider={provider === "all" ? "claude" : provider}
@@ -1031,7 +1053,8 @@ export default function App() {
             { id: "refresh", label: "Scan this PC for new chats", icon: <RefreshCw className="size-4" />, run: () => void rescan() },
             { id: "theme", label: dark ? "Switch to the light theme" : "Switch to the dark theme", icon: dark ? <Sun className="size-4" /> : <Moon className="size-4" />, run: () => setDark((d) => !d) },
           ]}
-        />
+        />}
+        </Suspense>
         <div className={cn("fixed top-3 z-30 transition-[left] duration-300 ease-in-out", sidebarOpen ? "left-[272px]" : "left-3", splash !== "off" && "hidden")}>
           <Tip label={sidebarOpen ? "Hide the sidebar" : "Show the sidebar"}>
             <Button variant="ghost" size="icon" className="text-muted-foreground" aria-label={sidebarOpen ? "Hide the sidebar" : "Show the sidebar"} onClick={() => setSidebarOpen((o) => !o)}>
@@ -1039,7 +1062,9 @@ export default function App() {
             </Button>
           </Tip>
         </div>
-        <SyncDialog open={syncOpen} onOpenChange={setSyncOpen} onChanged={rescan} toast={say} />
+        <Suspense fallback={null}>
+          {syncOpen && <SyncDialog open={syncOpen} onOpenChange={setSyncOpen} onChanged={rescan} toast={say} />}
+        </Suspense>
         <DeleteDialog
           chat={deleting}
           onClose={() => setDeleting(null)}
@@ -1051,7 +1076,8 @@ export default function App() {
             setReloadKey((n) => n + 1);
           }}
         />
-        <TagsDialog
+        <Suspense fallback={null}>
+        {tagging && <TagsDialog
           chat={tagging}
           suggestions={tagList.map(([t]) => t)}
           onClose={() => setTagging(null)}
@@ -1059,7 +1085,8 @@ export default function App() {
             loadTags();
             void quietReload();
           }}
-        />
+        />}
+        </Suspense>
         <RenameDialog
           chat={renaming}
           current={renaming ? (names[chatKey(renaming)] ?? "") : ""}

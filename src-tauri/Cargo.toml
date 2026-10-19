@@ -40,5 +40,11 @@ strip = true
 
 [profile.dev]
 debug = 0
+# Reading chats parses very large files, so the libraries are optimized even in development builds; ChatVault's own code stays quick to rebuild.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.test]
 debug = 0
