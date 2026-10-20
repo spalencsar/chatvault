@@ -27,6 +27,12 @@ Claude Code · Codex · Cursor · Gemini CLI · OpenCode · Cline — across eve
 <p align="center">
   <img src="docs/screenshots/03-search-all-tools.png" alt="Search across every tool at once: Claude, Codex, Gemini CLI, Cursor Agent, OpenCode and Cline, with sample data" width="900" />
 </p>
+<p align="center">
+  <img src="docs/screenshots/04-settings.png" alt="Settings: switch each tool on or off and see exactly where its chats are read from, with sample data" width="900" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/05-sync-backup.png" alt="Sync and backup: choose the backup folder, sync now, restore missing chats and back up automatically, with sample data" width="900" />
+</p>
 
 ---
 
