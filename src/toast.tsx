@@ -3,7 +3,7 @@ import hot, { Toaster } from "react-hot-toast";
 /** One place for every message ChatVault shows. Errors and confirmations get their own icon, the rest stay plain. */
 export function notify(message: string) {
   if (/^error|could not|couldn't|cannot|can't|can only|failed|not found|no longer|denied|unable|too large|not available|not opened|unknown|only (?:files|picture)|no project folder|binary|is a folder/i.test(message)) return hot.error(message);
-  if (/copied|saved|synced|restored|forked|ready|done|removed|added|exported|starting|started|moved|opened|pinned|unpinned|archived|renamed|updated|deleted/i.test(message)) return hot.success(message);
+  if (/copied|saved|synced|restored|forked|ready|done|removed|added|exported|starting|started|moved|opened|pinned|unpinned|archived|renamed|updated|deleted|recycle bin|changed/i.test(message)) return hot.success(message);
   return hot(message);
 }
 
@@ -26,6 +26,7 @@ export async function runAction(label: string, work: () => Promise<unknown> | un
   } catch (e) {
     clearTimeout(timer);
     if (id) hot.dismiss(id);
+    if (e instanceof DOMException && e.name === "AbortError") return;
     notifyError(e);
     return;
   }

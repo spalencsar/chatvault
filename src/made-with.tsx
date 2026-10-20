@@ -40,7 +40,7 @@ export function MadeWith({ className }: { className?: string }) {
   );
 }
 
-/** The bottom of the overview, all in one row: who made it, the project link, the version, the legal pages and a short notice. */
+/** The bottom of the overview, all in one row: the open source link, the version and the legal pages. */
 export function OverviewFooter() {
   const [version, setVersion] = useState("");
   const [legal, setLegal] = useState<LegalDoc | null>(null);
@@ -52,9 +52,6 @@ export function OverviewFooter() {
     <footer className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 rounded-xl border bg-card px-4 py-3 text-xs text-muted-foreground">
       <LegalDialog doc={legal} onDoc={setLegal} onClose={() => setLegal(null)} />
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-        <span className="flex items-center gap-1.5">
-          Made with <PixelHeart className="h-3.5 w-4" /> by Sunny
-        </span>
         <button className="flex cursor-pointer items-center gap-1 transition-colors hover:text-foreground" onClick={() => void openUrl(REPO_URL).catch(() => {})}>
           <GithubIcon className="size-3.5" /> Open source
         </button>

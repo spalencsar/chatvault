@@ -16,7 +16,7 @@ import { cn } from "@/lib/utils";
 
 /** One line of a right-click menu. Menus are described as data so every window can build its own list. */
 export type Entry =
-  | { type: "item"; label: string; icon?: ReactNode; hint?: string; onSelect: () => void | Promise<void>; danger?: boolean; disabled?: boolean }
+  | { type: "item"; label: string; icon?: ReactNode; hint?: string; onSelect: () => void | Promise<void>; danger?: boolean; muted?: boolean; disabled?: boolean }
   | { type: "check"; label: string; icon?: ReactNode; checked: boolean; onSelect: () => void }
   | { type: "sub"; label: string; icon?: ReactNode; entries: Entry[] }
   | { type: "label"; label: string }
@@ -65,7 +65,7 @@ function Lines({ entries, onError }: { entries: Entry[]; onError: (e: unknown) =
             </ContextMenuCheckboxItem>
           );
         return (
-          <ContextMenuItem key={i} variant={e.danger ? "destructive" : "default"} disabled={e.disabled} onClick={() => void Promise.resolve(e.onSelect()).catch(onError)}>
+          <ContextMenuItem key={i} variant={e.danger ? "destructive" : "default"} className={e.muted ? "opacity-50" : undefined} disabled={e.disabled} onClick={() => void Promise.resolve(e.onSelect()).catch(onError)}>
             {e.icon}
             {e.label}
           </ContextMenuItem>

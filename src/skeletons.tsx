@@ -61,7 +61,7 @@ function StepsSkeleton() {
 /** Messages while a chat is loading. Same width and spacing as the real conversation. */
 export function MessagesSkeleton() {
   return (
-    <div className="mx-auto max-w-3xl space-y-7 px-4 pb-24 pt-4" aria-busy="true">
+    <div className="mx-auto w-full max-w-3xl space-y-7 px-4 pb-24 pt-4" aria-busy="true">
       <MessageSkeleton right lines={2} />
       <StepsSkeleton />
       <MessageSkeleton lines={5} />

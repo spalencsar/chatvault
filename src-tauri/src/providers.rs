@@ -21,6 +21,9 @@ pub struct Msg {
     pub data: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<bool>,
+    /// Native database items keep their completed tool output on the same item.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Box<Msg>>,
 }
 
 /// Pictures larger than this are shown as a placeholder instead of being sent to the viewer.
@@ -28,7 +31,7 @@ const IMAGE_MAX: usize = 4_000_000;
 
 impl Msg {
     pub fn new(role: &str, ts: &str, text: String, kind: &str) -> Msg {
-        Msg { role: role.into(), ts: ts.into(), text, kind: kind.into(), id: None, name: None, data: None, error: None }
+        Msg { role: role.into(), ts: ts.into(), text, kind: kind.into(), id: None, name: None, data: None, error: None, result: None }
     }
 }
 
@@ -93,7 +96,7 @@ fn keeps_data(name: &str) -> bool {
 }
 
 /// Long strings inside tool input are shortened so a chat page stays small.
-fn trim_value(v: &Value) -> Value {
+pub(crate) fn trim_value(v: &Value) -> Value {
     match v {
         Value::String(s) => Value::String(clip(s, 3000)),
         Value::Array(a) => Value::Array(a.iter().take(60).map(trim_value).collect()),

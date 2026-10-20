@@ -44,7 +44,7 @@ export function TitleBar({ title, actions, sidebarOpen, busy, dark, onRefresh, o
         <Control label="Scan this PC for new chats" onClick={onRefresh}>
           <RefreshCw className={cn("size-3.5", busy && "animate-spin")} strokeWidth={1.5} />
         </Control>
-        <Control label={dark ? "Switch to the light theme" : "Switch to the dark theme"} onClick={onTheme}>
+        <Control label={dark ? "Light theme" : "Dark theme"} onClick={onTheme}>
           {dark ? <Sun className="size-3.5" strokeWidth={1.5} /> : <Moon className="size-3.5" strokeWidth={1.5} />}
         </Control>
         <span className="mx-2.5 h-3.5 w-px shrink-0 bg-border" />

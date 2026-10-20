@@ -33,8 +33,7 @@ fn mtime(p: &Path) -> i64 {
 }
 
 fn open_ro(path: &Path) -> Option<Connection> {
-    let p = path.to_string_lossy().replace('\\', "/").replace(' ', "%20").replace('#', "%23");
-    Connection::open_with_flags(format!("file:{}?mode=ro", p), OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
 }
 
 fn read_json(p: &Path) -> Option<Value> {
@@ -43,10 +42,21 @@ fn read_json(p: &Path) -> Option<Value> {
 
 // ---------------- Gemini CLI ----------------
 
+/// The folders Gemini CLI keeps its chats in.
+pub fn gemini_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for p in [env_path("GEMINI_CLI_HOME").map(|p| p.join(".gemini/tmp")), home().map(|h| h.join(".gemini/tmp"))].into_iter().flatten() {
+        if !roots.contains(&p) {
+            roots.push(p);
+        }
+    }
+    roots
+}
+
 fn gemini_files() -> Vec<PathBuf> {
-    let Some(tmp) = home().map(|h| h.join(".gemini").join("tmp")) else { return Vec::new() };
     let mut out = Vec::new();
-    let Ok(rd) = fs::read_dir(&tmp) else { return out };
+    for tmp in gemini_roots() {
+    let Ok(rd) = fs::read_dir(&tmp) else { continue };
     for proj in rd.flatten() {
         let chats = proj.path().join("chats");
         if let Ok(files) = fs::read_dir(&chats) {
@@ -57,6 +67,7 @@ fn gemini_files() -> Vec<PathBuf> {
                 }
             }
         }
+    }
     }
     out
 }
@@ -162,12 +173,35 @@ fn scan_gemini(out: &mut Vec<OtherChat>) {
 // ---------------- OpenCode ----------------
 
 fn opencode_db() -> Option<PathBuf> {
-    let p = home()?.join(".local").join("share").join("opencode").join("opencode.db");
-    p.exists().then_some(p)
+    opencode_dbs().into_iter().next()
+}
+/// Where OpenCode's database can be: the places it is looked for, whether or not a file is there.
+pub fn opencode_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for p in [env_path("OPENCODE_DB"), env_path("XDG_DATA_HOME").map(|p| p.join("opencode/opencode.db")), home().map(|h| h.join(".local/share/opencode/opencode.db"))].into_iter().flatten() {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+pub fn opencode_found() -> Vec<PathBuf> {
+    opencode_dbs()
+}
+
+fn opencode_dbs() -> Vec<PathBuf> {
+    let mut out=Vec::new();
+    for p in [env_path("OPENCODE_DB"),env_path("XDG_DATA_HOME").map(|p|p.join("opencode/opencode.db")),home().map(|h|h.join(".local/share/opencode/opencode.db"))].into_iter().flatten() {
+        if p.is_file() && !out.contains(&p) {out.push(p);}
+    }
+    out
 }
 
 fn scan_opencode(out: &mut Vec<OtherChat>) {
-    let Some(db) = opencode_db() else { return };
+    for db in opencode_dbs() { scan_opencode_db(&db,out); }
+}
+fn scan_opencode_db(db:&Path,out:&mut Vec<OtherChat>) {
     let Some(c) = open_ro(&db) else { return };
     let Ok(mut st) = c.prepare("SELECT s.id, s.title, s.directory, s.time_created, s.time_updated, (SELECT COUNT(*) FROM message m WHERE m.session_id=s.id) FROM session s") else { return };
     let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?)));
@@ -184,14 +218,18 @@ fn scan_opencode(out: &mut Vec<OtherChat>) {
             created_ms: Some(created),
             last_ms: updated.max(created),
             size: n * 2000,
-            path: format!("opencode:{}", id),
+            path: format!("opencode:{}|{}", db.display(), id),
             model: None,
         });
     }
 }
 
-fn opencode_messages(id: &str) -> Vec<Msg> {
-    let Some(db) = opencode_db() else { return Vec::new() };
+fn opencode_messages(key: &str) -> Vec<Msg> {
+    let (db,id)=if let Some((path,id))=key.rsplit_once('|') {
+        let db=PathBuf::from(path);
+        if !opencode_dbs().contains(&db) {return Vec::new();}
+        (db,id)
+    } else { let Some(db)=opencode_db() else{return Vec::new()};(db,key) };
     let Some(c) = open_ro(&db) else { return Vec::new() };
     let Ok(mut st) = c.prepare("SELECT m.id, m.time_created, m.data FROM message m WHERE m.session_id=?1 ORDER BY m.time_created") else { return Vec::new() };
     let msgs: Vec<(String, i64, String)> = st.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map(|r| r.flatten().collect()).unwrap_or_default();
@@ -243,19 +281,60 @@ fn opencode_messages(id: &str) -> Vec<Msg> {
 
 // ---------------- Cline ----------------
 
+/// The folders Cline keeps its tasks in: its own command line, and the extension inside each editor.
+/// The Google account Gemini CLI is signed in with (its list of accounts holds emails only, no tokens).
+pub fn gemini_account() -> Option<String> {
+    let f = home()?.join(".gemini/google_accounts.json");
+    let v: Value = serde_json::from_str(&fs::read_to_string(f).ok()?).ok()?;
+    v.get("active")?.as_str().filter(|e| e.contains('@')).map(String::from)
+}
+
+pub fn cline_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(h) = home() {
+        roots.push(h.join(".cline/data/sessions"));
+    }
+    if let Some(app) = env_path("APPDATA") {
+        for editor in ["Code", "Code - Insiders", "Cursor", "Windsurf", "VSCodium"] {
+            let user = app.join(editor).join("User");
+            roots.push(user.join("globalStorage/saoudrizwan.claude-dev/tasks"));
+            for profile in subdirs(&user.join("profiles")) {
+                roots.push(profile.join("globalStorage/saoudrizwan.claude-dev/tasks"));
+            }
+        }
+    }
+    roots
+}
+
+pub fn gemini_chat_files() -> Vec<PathBuf> {
+    gemini_files()
+}
+
+pub fn cline_chat_files() -> Vec<PathBuf> {
+    cline_sessions()
+}
+
+/// How many chats an OpenCode database holds.
+pub fn opencode_chat_count(db: &Path) -> Option<usize> {
+    let c = open_ro(db)?;
+    c.query_row("SELECT COUNT(*) FROM session", [], |r| r.get::<_, i64>(0)).ok().map(|n| n as usize)
+}
+
 fn cline_sessions() -> Vec<PathBuf> {
-    let Some(root) = home().map(|h| h.join(".cline").join("data").join("sessions")) else { return Vec::new() };
     let mut out = Vec::new();
-    let Ok(rd) = fs::read_dir(&root) else { return out };
+    let roots = cline_roots();
+    for root in roots {
+    let Ok(rd) = fs::read_dir(&root) else { continue };
     for d in rd.flatten() {
         if let Ok(files) = fs::read_dir(d.path()) {
             for f in files.flatten() {
                 let p = f.path();
-                if p.file_name().map(|n| n.to_string_lossy().ends_with(".messages.json")).unwrap_or(false) {
+                if p.file_name().map(|n| n.to_string_lossy().ends_with(".messages.json") || n=="api_conversation_history.json").unwrap_or(false) {
                     out.push(p);
                 }
             }
         }
+    }
     }
     out
 }
@@ -284,7 +363,7 @@ fn clean_cline_text(t: &str) -> String {
 fn cline_messages(p: &Path) -> Vec<Msg> {
     let Some(j) = read_json(p) else { return Vec::new() };
     let mut out = Vec::new();
-    for m in j.get("messages").and_then(|m| m.as_array()).cloned().unwrap_or_default() {
+    for m in j.as_array().or_else(||j.get("messages").and_then(|m|m.as_array())).cloned().unwrap_or_default() {
         let role = if m.get("role").and_then(|r| r.as_str()) == Some("user") { "user" } else { "assistant" };
         let ts = m.get("ts").and_then(|t| t.as_str().map(String::from).or_else(|| t.as_i64().map(|n| n.to_string()))).and_then(|s| s.parse::<i64>().ok()).and_then(chrono::DateTime::from_timestamp_millis).map(|d| d.to_rfc3339()).unwrap_or_default();
         for b in blocks(m.get("content").unwrap_or(&Value::Null)) {
@@ -333,7 +412,7 @@ fn scan_cline(out: &mut Vec<OtherChat>) {
     for p in cline_sessions() {
         let msgs = cline_messages(&p);
         let Some(first) = msgs.iter().find(|m| m.role == "user") else { continue };
-        let meta = p.with_file_name(p.file_name().map(|n| n.to_string_lossy().replace(".messages.json", ".json")).unwrap_or_default());
+        let meta = if p.file_name().is_some_and(|n|n=="api_conversation_history.json") {p.with_file_name("task_metadata.json")} else {p.with_file_name(p.file_name().map(|n| n.to_string_lossy().replace(".messages.json", ".json")).unwrap_or_default())};
         let mj = read_json(&meta);
         let started = mj.as_ref().and_then(|m| m.get("started_at")).and_then(|s| s.as_str()).and_then(ms_of);
         let ended = mj.as_ref().and_then(|m| m.get("ended_at")).and_then(|s| s.as_str()).and_then(ms_of);
@@ -371,7 +450,7 @@ pub fn fingerprint() -> i64 {
     for p in cline_sessions() {
         m = m.max(mtime(&p));
     }
-    if let Some(db) = opencode_db() {
+    for db in opencode_dbs() {
         m = m.max(mtime(&db));
         let mut wal = db.into_os_string();
         wal.push("-wal");
@@ -397,6 +476,23 @@ pub fn is_virtual(path: &str) -> bool {
     TOOLS.iter().any(|t| path.starts_with(&format!("{t}:")))
 }
 
+/// What deleting a Gemini or Cline chat removes: only a file or folder that the scan itself lists, so a path
+/// from outside can never point this at anything else. A Cline task is a folder, so the whole folder goes.
+pub fn deletable(path: &str) -> Option<PathBuf> {
+    let same = |a: &Path, b: &Path| matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y);
+    if let Some(p) = path.strip_prefix("gemini:") {
+        let p = PathBuf::from(p);
+        return gemini_files().into_iter().find(|f| same(f, &p)).map(|_| p);
+    }
+    if let Some(p) = path.strip_prefix("cline:") {
+        let p = PathBuf::from(p);
+        let listed = cline_sessions().into_iter().find(|f| same(f, &p))?;
+        let task = listed.parent().filter(|d| listed.file_name().is_some_and(|n| n == "api_conversation_history.json") && d.parent().and_then(|t| t.file_name()).is_some_and(|n| n == "tasks"));
+        return Some(task.map(Path::to_path_buf).unwrap_or(listed));
+    }
+    None
+}
+
 /// The real file behind a virtual path, for "show file".
 pub fn real_file(path: &str) -> Option<PathBuf> {
     if let Some(p) = path.strip_prefix("gemini:").or_else(|| path.strip_prefix("cline:")) {
@@ -404,7 +500,63 @@ pub fn real_file(path: &str) -> Option<PathBuf> {
         return p.exists().then_some(p);
     }
     if path.starts_with("opencode:") {
+        if let Some((db,_))=path.strip_prefix("opencode:")?.rsplit_once('|') {
+            return opencode_dbs().into_iter().find(|p|p==Path::new(db));
+        }
         return opencode_db();
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn extension_and_cli_cline_transcripts_both_parse() {
+        let sample=serde_json::json!([{"role":"user","content":[{"type":"text","text":"fixture question"}]},{"role":"assistant","content":[{"type":"text","text":"fixture answer"}]}]);
+        for value in [sample.clone(),serde_json::json!({"messages":sample})] {
+            let path=crate::cli::script_file("").unwrap().with_extension("json");
+            fs::write(&path,value.to_string()).unwrap();
+            let messages=cline_messages(&path);
+            assert_eq!(messages.len(),2);assert_eq!(messages[0].role,"user");assert_eq!(messages[1].text,"fixture answer");
+        }
+    }
+    #[test]
+    fn database_paths_with_unicode_spaces_hash_and_percent_are_read_only() {
+        let dir=crate::cli::script_file("").unwrap().with_extension("fixture");fs::create_dir_all(&dir).unwrap();
+        let db=dir.join("other user's 非ASCII #100%.db");
+        {let c=Connection::open(&db).unwrap();c.execute_batch("CREATE TABLE fixture(value TEXT); INSERT INTO fixture VALUES('readable')").unwrap();}
+        let c=open_ro(&db).unwrap();
+        assert_eq!(c.query_row("SELECT value FROM fixture",[],|r|r.get::<_,String>(0)).unwrap(),"readable");
+        assert!(c.execute("INSERT INTO fixture VALUES('no write')",[]).is_err());
+    }
+    #[test]
+    fn only_chats_the_scan_lists_can_be_deleted() {
+        let root = crate::cli::script_file("").unwrap().with_extension("geminihome");
+        let chats = root.join(".gemini/tmp/project/chats");
+        fs::create_dir_all(&chats).unwrap();
+        let listed = chats.join("session-1.json");
+        fs::write(&listed, r#"{"sessionId":"s1","messages":[{"type":"user","content":"hello"}]}"#).unwrap();
+        let stranger = root.join("not-a-chat.json");
+        fs::write(&stranger, "{}").unwrap();
+        // SAFETY: only this test reads GEMINI_CLI_HOME, and it sets and clears it within the test.
+        unsafe { std::env::set_var("GEMINI_CLI_HOME", &root) };
+        let found = deletable(&format!("gemini:{}", listed.display()));
+        assert_eq!(found.map(|p| p.canonicalize().unwrap()), Some(listed.canonicalize().unwrap()));
+        assert!(deletable(&format!("gemini:{}", stranger.display())).is_none(), "a file the scan does not list must be refused");
+        assert!(deletable(&format!("gemini:{}", chats.join("..").join("..").join("..").join("not-a-chat.json").display())).is_none());
+        assert!(deletable("opencode:whatever|id").is_none());
+        unsafe { std::env::remove_var("GEMINI_CLI_HOME") };
+        let _ = fs::remove_dir_all(&root);
+    }
+    #[test]
+    #[ignore="read-only inspection of local provider stores"]
+    fn real_provider_stores() {
+        let chats=scan();
+        for tool in TOOLS {
+            let selected:Vec<_>=chats.iter().filter(|c|c.provider==tool).collect();
+            println!("{tool}: {} readable chats",selected.len());
+            for chat in selected {assert!(!read(&chat.path).unwrap().is_empty());}
+        }
+    }
 }

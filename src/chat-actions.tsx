@@ -1,4 +1,5 @@
 import { toReaderHtml } from "@/reader-html";
+import { launchCli } from "@/launch-cli";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import {
@@ -23,11 +24,35 @@ import {
 export type Provider = "claude" | "codex" | "cursor" | "gemini" | "opencode" | "cline";
 /** What the sidebar lists: one tool, or every tool together. */
 export type Tool = Provider | "all";
-export const PROVIDERS: Provider[] = ["claude", "codex", "cursor", "gemini", "opencode", "cline"];
+const EVERY_PROVIDER: Provider[] = ["claude", "codex", "cursor", "gemini", "opencode", "cline"];
+const EVERY_CORE: Provider[] = ["claude", "codex", "cursor"];
+/** The tools ChatVault looks at. A tool switched off in Settings is left out, so every list and chart that reads this drops it. */
+export const PROVIDERS: Provider[] = [...EVERY_PROVIDER];
 /** The tools always shown on the overview. The others appear once ChatVault finds their chats. */
-export const CORE_PROVIDERS: Provider[] = ["claude", "codex", "cursor"];
+export const CORE_PROVIDERS: Provider[] = [...EVERY_CORE];
+const switchedOff = new Set<Provider>();
+/** Applies the list of tools switched off in Settings. The two arrays above are changed in place, so nothing else needs to know. */
+export function setOffTools(list: string[]) {
+  switchedOff.clear();
+  list.forEach((p) => switchedOff.add(p as Provider));
+  PROVIDERS.splice(0, PROVIDERS.length, ...EVERY_PROVIDER.filter((p) => !switchedOff.has(p)));
+  CORE_PROVIDERS.splice(0, CORE_PROVIDERS.length, ...EVERY_CORE.filter((p) => !switchedOff.has(p)));
+}
+export const isToolOn = (p: Provider) => !switchedOff.has(p);
 /** Tools whose chats cannot be resumed from here: they continue in Claude or Codex through a handoff file. */
 export const isHandoffOnly = (p: Provider) => p !== "claude" && p !== "codex";
+/**
+ * How deleting a chat works. Most chats are a file or folder that goes to the Recycle Bin ("trash"). OpenCode keeps
+ * its sessions in its own database, so OpenCode deletes the session itself ("opencode"). A chat kept inside another
+ * app's database (Cursor's editor, Codex's database) cannot be removed safely from outside ("blocked"): Delete stays
+ * visible but grayed, and says so when it is clicked.
+ */
+export type DeleteKind = "trash" | "opencode" | "blocked";
+export const deleteKind = (c: { provider: Provider; path: string }): DeleteKind =>
+  c.provider === "opencode" ? "opencode" : c.path.startsWith("cursor-ide:") || c.path.startsWith("codex-db:") ? "blocked" : "trash";
+/** What a click on a grayed Delete tells the user. */
+export const deleteBlockedMessage = (tool: string) =>
+  `This chat is stored inside ${tool} itself, so ChatVault can't delete it. Delete it in ${tool}, or use Archive to hide it here.`;
 export const PROVIDER_SHORT: Record<Provider, string> = { claude: "Claude", codex: "Codex", cursor: "Cursor", gemini: "Gemini", opencode: "OpenCode", cline: "Cline" };
 
 export type Chat = {
@@ -57,6 +82,7 @@ export type Msg = {
   name?: string;
   data?: Record<string, unknown> | string;
   error?: boolean;
+  result?: Msg;
 };
 /** `partial` marks the quick first view of a chat's newest messages, before the full page and total are known. */
 export type MsgPage = { messages: Msg[]; total: number; start: number; partial?: boolean };
@@ -101,9 +127,16 @@ export const setAccountNames = (list: AccountInfo[]) => {
   // The Claude app can only open chats that belong to the account it is signed in to right now.
   desktopAccounts = new Set(list.filter((a) => a.desktopCurrent).map((a) => a.id));
 };
-/** The email when it is known, otherwise the first 8 characters of the account id. */
-export const accountLabel = (a: string) =>
-  a === "unknown" ? "Unknown account" : a === "local" ? "This computer" : (accountEmails[a] ?? `Account ${a.slice(0, 8)}`);
+let customAccountNames: Record<string, string> = {};
+/** The names you gave to accounts (see Rename account). */
+export const setCustomAccountNames = (names: Record<string, string>) => {
+  customAccountNames = names;
+};
+/** The email when it is known (Gemini and Cursor store it as the account itself), otherwise the first 8 characters of the account id. */
+export const originalAccountLabel = (a: string) =>
+  a === "unknown" ? "Unknown account" : a === "local" ? "This computer" : a.includes("@") ? a : (accountEmails[a] ?? `Account ${a.slice(0, 8)}`);
+/** The name you gave the account, or else its email or id. */
+export const accountLabel = (a: string) => customAccountNames[a] ?? originalAccountLabel(a);
 
 /** "2026-10-18_05-30": the moment of the export, safe in a file name. */
 const fileStamp = () => {
@@ -277,7 +310,7 @@ ${clip(m.text, max)}
 
 /** The chat's own transcript file, only when the original is there. A backup copy, a database-only chat and a compressed file are not worth pointing an AI at: it would hunt for a file it can't use. */
 /** Cursor, Gemini and the other tools keep chats in databases: their "path" is a label like "cursor:...", not a file. */
-const isFilePath = (path: string) => !/^[a-z]{2,}:/i.test(path);
+const isFilePath = (path: string) => !/^[a-z][a-z0-9-]+:/i.test(path);
 export const originalPath = (chat: Chat) => (!chat.backup && isFilePath(chat.path) && !/\.(zst|gz|zip)$/i.test(chat.path) ? chat.path : null);
 const originalFileLines = (chat: Chat) => {
   const o = originalPath(chat);
@@ -400,6 +433,8 @@ export type ChatAction = {
   /** 1 and 2 are the two buttons shown in the chat header. */
   slot?: 1 | 2;
   danger?: boolean;
+  /** Shown grayed: the action is listed but not available for this chat; clicking it explains why. */
+  muted?: boolean;
   run: () => Promise<void>;
 };
 
@@ -409,17 +444,17 @@ type Toast = (m: string) => void;
 const TOOLS: { id: Provider; name: string; command: (path: string, chat: Chat) => string; icon: LucideIcon }[] = [
   { id: "claude", name: "Claude", command: (path, chat) => claudeHandoffCommand(path, chat), icon: Sparkles },
   { id: "codex", name: "Codex", command: (path, chat) => codexHandoffCommand(path, chat), icon: Bot },
-  { id: "gemini", name: "Gemini CLI", command: (path, chat) => `gemini '${psq(buildPrompt(chat, path))}' --include-directories '${psq(path.replace(/[\\/][^\\/]*$/, ""))}'`, icon: Bot },
-  { id: "cursor", name: "Cursor Agent", command: (path, chat) => `cursor-agent '${psq(buildPrompt(chat, path))}'`, icon: Bot },
+  { id: "gemini", name: "Gemini CLI", command: (path, chat) => `gemini --prompt-interactive '${psq(buildPrompt(chat, path))}' --include-directories '${psq(path.replace(/[\\/][^\\/]*$/, ""))}'`, icon: Bot },
+  { id: "cursor", name: "Cursor Agent", command: (path, chat) => `agent '${psq(buildPrompt(chat, path))}'`, icon: Bot },
   { id: "opencode", name: "OpenCode", command: (path, chat) => `opencode --prompt '${psq(buildPrompt(chat, path))}'`, icon: Bot },
-  { id: "cline", name: "Cline", command: (path, chat) => `cline '${psq(buildPrompt(chat, path))}'`, icon: Bot },
+  { id: "cline", name: "Cline", command: (path, chat) => `cline --tui --auto-approve false '${psq(buildPrompt(chat, path))}'`, icon: Bot },
 ];
 
 /** "Continue in <tool>" and "Copy <tool> command" for every tool the chat is not already from. */
 function handoffActions(chat: Chat, toast: Toast, skip: Provider[]): ChatAction[] {
   const cd = cdTo(chat);
   const out: ChatAction[] = [];
-  TOOLS.filter((t) => t.id !== chat.provider && !skip.includes(t.id)).forEach((t) => {
+  TOOLS.filter((t) => t.id !== chat.provider && !skip.includes(t.id) && isToolOn(t.id)).forEach((t) => {
     out.push({
       id: `continue-${t.id}`,
       label: `Continue in ${t.name}`,
@@ -428,7 +463,7 @@ function handoffActions(chat: Chat, toast: Toast, skip: Provider[]): ChatAction[
       group: "Continue",
       run: async () => {
         const handoff = await prepareHandoff(chat);
-        await invoke("launch_agent", { agent: `${t.id}-handoff`, id: chat.id, cwd: chat.cwd, handoff, prompt: buildPrompt(chat, handoff) });
+        await launchCli({ agent: `${t.id}-handoff`, id: chat.id, cwd: chat.cwd, handoff, prompt: buildPrompt(chat, handoff) });
         toast(`Starting ${t.name} in a terminal`);
       },
     });
@@ -437,6 +472,7 @@ function handoffActions(chat: Chat, toast: Toast, skip: Provider[]): ChatAction[
       label: `Copy ${t.name} command`,
       hint: `Saves the handoff file and copies the command that starts ${t.name} with it.`,
       icon: Terminal,
+      logo: t.id,
       group: "Copy",
       run: async () => {
         const handoff = await prepareHandoff(chat);
@@ -460,7 +496,7 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
     toast(`${what} copied`);
   };
   const launch = (agent: string, extra: Record<string, unknown> = {}) =>
-    invoke("launch_agent", { agent, id: chat.id, cwd: chat.cwd, ...extra });
+    launchCli({ agent, id: chat.id, cwd: chat.cwd, ...extra });
 
   const continueClaude: ChatAction = isClaude
     ? {
@@ -521,10 +557,15 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
     {
       id: "fork",
       label: "Fork chat",
-      hint: "Makes a copy of this chat that appears in the list right away. The original is left untouched.",
+      hint: chat.path.startsWith("codex-db:") ? "Opens Codex's fork command for this chat in a terminal." : "Makes a copy of this chat that appears in the list right away. The original is left untouched.",
       icon: GitFork,
       group: "Continue",
       run: async () => {
+        if (chat.path.startsWith("codex-db:")) {
+          await launch("codex-fork");
+          toast("Starting Codex fork in a terminal");
+          return;
+        }
         const f = await invoke<{ id: string; path: string }>("fork_chat", { provider: chat.provider, path: chat.path });
         window.dispatchEvent(new CustomEvent("chatvault:forked", { detail: { from: chat, id: f.id, path: f.path } }));
         toast("Forked. The copy is in your list.");
@@ -573,6 +614,7 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
       label: isClaude ? "Copy Claude command" : "Copy Codex command",
       hint: "Saves the handoff file and copies the command that starts a new session of this tool with it.",
       icon: Terminal,
+      logo: isClaude ? "claude" : "codex",
       group: "Copy",
       run: async () => {
         const handoff = await prepareHandoff(chat);
@@ -584,6 +626,7 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
       label: isClaude ? "Copy Codex command" : "Copy Claude command",
       hint: "Saves the handoff file and copies the command that starts the other tool with it.",
       icon: Terminal,
+      logo: isClaude ? "codex" : "claude",
       group: "Copy",
       run: async () => {
         const handoff = await prepareHandoff(chat);
@@ -641,7 +684,7 @@ function cursorActions(chat: Chat, toast: Toast, _msgs?: Msg[] | null): ChatActi
   };
   const handoffRun = (agent: "claude-handoff" | "codex-handoff", name: string) => async () => {
     const handoff = await prepareHandoff(chat);
-    await invoke("launch_agent", { agent, id: chat.id, cwd: chat.cwd, handoff, prompt: buildPrompt(chat, handoff) });
+    await launchCli({ agent, id: chat.id, cwd: chat.cwd, handoff, prompt: buildPrompt(chat, handoff) });
     toast(`Starting ${name} in a terminal`);
   };
   const list: ChatAction[] = [
@@ -699,6 +742,7 @@ function cursorActions(chat: Chat, toast: Toast, _msgs?: Msg[] | null): ChatActi
       label: "Copy Claude command",
       hint: "Saves the handoff file and copies the command that starts Claude Code with it.",
       icon: Terminal,
+      logo: "claude",
       group: "Copy",
       run: async () => copy(`${cd}${claudeHandoffCommand(await prepareHandoff(chat), chat)}`, "Command"),
     },
@@ -707,6 +751,7 @@ function cursorActions(chat: Chat, toast: Toast, _msgs?: Msg[] | null): ChatActi
       label: "Copy Codex command",
       hint: "Saves the handoff file and copies the command that starts Codex with it.",
       icon: Terminal,
+      logo: "codex",
       group: "Copy",
       run: async () => copy(`${cd}${codexHandoffCommand(await prepareHandoff(chat), chat)}`, "Command"),
     },

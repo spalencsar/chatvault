@@ -1,9 +1,14 @@
+mod backuploc;
 mod cursor;
+mod cli;
+mod codex_db;
 mod index;
+mod integrations;
 mod others;
 mod pageindex;
 mod paths;
 mod providers;
+mod sources;
 mod sync;
 
 use index::{ChatSummary, Overview, Page};
@@ -31,12 +36,14 @@ struct MsgPage {
 }
 
 /// Cursor and the other tools whose chats live in a database or in one JSON file, not in a transcript line by line.
-fn is_virtual(p: &str) -> bool {
-    p == "cursor" || others::TOOLS.contains(&p)
+fn is_virtual(p: &str, path: &str) -> bool {
+    p == "cursor" || others::TOOLS.contains(&p) || (p == "codex" && path.starts_with("codex-db:"))
 }
 
 fn read_virtual(provider: &str, path: &str) -> Result<Vec<Msg>, String> {
-    if provider == "cursor" {
+    if provider == "codex" && path.starts_with("codex-db:") {
+        codex_db::read(path)
+    } else if provider == "cursor" {
         cursor::read(path)
     } else {
         others::read(path)
@@ -125,7 +132,12 @@ struct OutlineTick {
 async fn chat_outline(provider: String, path: String) -> Result<Vec<OutlineTick>, String> {
     provider_ok(&provider)?;
     tauri::async_runtime::spawn_blocking(move || {
-        if is_virtual(&provider) {
+        if provider == "codex" && path.starts_with("codex-db:") {
+            let users:Vec<_>=codex_db::read(&path)?.into_iter().filter(|m|m.role=="user" && m.kind=="text").collect();
+            let step=users.len().div_ceil(240).max(1);
+            return Ok(users.into_iter().step_by(step).map(|m|OutlineTick{ts:m.ts,text:clip(&m.text,200)}).collect());
+        }
+        if is_virtual(&provider, &path) {
             return Err("not supported".to_string());
         }
         let p = check_transcript(&path)?;
@@ -187,8 +199,8 @@ async fn fork_chat(provider: String, path: String) -> Result<Forked, String> {
     provider_ok(&provider)?;
     tauri::async_runtime::spawn_blocking(move || {
         use std::io::Write;
-        if is_virtual(&provider) {
-            return Err("Cursor chats cannot be forked. Use Continue in Claude or Codex instead.".to_string());
+        if is_virtual(&provider, &path) {
+            return Err("This chat is stored in its tool's database. Use the tool's fork command or Continue in Claude or Codex.".to_string());
         }
         let src = check_transcript(&path)?;
         let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
@@ -420,7 +432,8 @@ fn chat_stamps(items: Vec<(String, String)>) -> Vec<u64> {
     items
         .into_iter()
         .map(|(provider, path)| {
-            if is_virtual(&provider) {
+            if provider == "codex" && path.starts_with("codex-db:") { return codex_db::stamp(&path).map(|s|s.1).unwrap_or(0); }
+            if is_virtual(&provider, &path) {
                 return 0;
             }
             let Ok(p) = check_transcript(&path) else { return 0 };
@@ -438,6 +451,9 @@ fn chat_stamps(items: Vec<(String, String)>) -> Vec<u64> {
 #[tauri::command]
 fn chat_stamp(provider: String, path: String) -> Result<(u64, u64), String> {
     provider_ok(&provider)?;
+    if provider=="codex" && path.starts_with("codex-db:") {
+        return codex_db::stamp(&path);
+    }
     let p = check_transcript(&path)?;
     let md = std::fs::metadata(&p).map_err(|e| e.to_string())?;
     let ms = md.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
@@ -451,7 +467,8 @@ async fn read_chat_tail(provider: String, path: String, limit: usize) -> Result<
     provider_ok(&provider)?;
     tauri::async_runtime::spawn_blocking(move || {
         use std::io::{Read, Seek, SeekFrom};
-        if is_virtual(&provider) {
+        if provider == "codex" && path.starts_with("codex-db:") { return codex_db::page(&path,None,limit.clamp(1,400)).map(|p|p.0); }
+        if is_virtual(&provider, &path) {
             return Err("not supported".to_string());
         }
         let p = check_transcript(&path)?;
@@ -499,7 +516,11 @@ async fn read_chat_tail(provider: String, path: String, limit: usize) -> Result<
 async fn read_chat_page(provider: String, path: String, before: Option<usize>, limit: usize) -> Result<MsgPage, String> {
     provider_ok(&provider)?;
     tauri::async_runtime::spawn_blocking(move || {
-        if is_virtual(&provider) {
+        if provider == "codex" && path.starts_with("codex-db:") {
+            let (messages,total,start) = codex_db::page(&path,before,limit.clamp(1,2000))?;
+            return Ok(MsgPage { messages:messages.into_iter().map(|m|clip_msg(m,30_000)).collect(),total,start });
+        }
+        if is_virtual(&provider, &path) {
             let all: Vec<Msg> = read_virtual(&provider, &path)?.into_iter().map(|m| clip_msg(m, 30_000)).collect();
             let total = all.len();
             let limit = limit.clamp(1, 2000);
@@ -566,7 +587,7 @@ async fn read_chat_page(provider: String, path: String, before: Option<usize>, l
 async fn read_chat_all(provider: String, path: String) -> Result<Vec<Msg>, String> {
     provider_ok(&provider)?;
     tauri::async_runtime::spawn_blocking(move || {
-        if is_virtual(&provider) {
+        if is_virtual(&provider, &path) {
             return Ok(read_virtual(&provider, &path)?.into_iter().filter(is_readable).map(|m| clip_msg(m, 20_000)).collect());
         }
         let p = check_transcript(&path)?;
@@ -615,7 +636,9 @@ fn search_index_status() -> Result<(i64, i64), String> {
 
 #[tauri::command]
 fn reveal_in_folder(path: String) -> Result<(), String> {
-    let p = if path.starts_with("cursor-") {
+    let p = if path.starts_with("codex-db:") {
+        codex_db::real_file(&path)?
+    } else if path.starts_with("cursor-") {
         cursor::real_file(&path).ok_or("That Cursor file is not available")?
     } else if others::is_virtual(&path) {
         others::real_file(&path).ok_or("That file is not available")?
@@ -636,11 +659,72 @@ fn open_folder(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Sends a file or a folder to the Recycle Bin, so it can still be restored from there.
+fn recycle(target: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let plain = target.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+    let script = if target.is_dir() {
+        "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($env:CHATVAULT_PATH, 'OnlyErrorDialogs', 'SendToRecycleBin')"
+    } else {
+        "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($env:CHATVAULT_PATH, 'OnlyErrorDialogs', 'SendToRecycleBin')"
+    };
+    let status = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("CHATVAULT_PATH", &plain)
+        .creation_flags(0x0800_0000)
+        .status()
+        .map_err(|e| e.to_string())?;
+    if !status.success() || Path::new(&plain).exists() {
+        return Err("It could not be moved to the Recycle Bin".into());
+    }
+    Ok(())
+}
+
 /// Moves a chat transcript to the Recycle Bin, so it can still be restored from there.
 #[tauri::command]
 async fn delete_chat(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        if others::is_virtual(&path) {
+        // OpenCode keeps its sessions in its own database, so the session is deleted by OpenCode itself and
+        // ChatVault never edits that database. Unlike a file, this cannot be restored from the Recycle Bin.
+        if let Some(rest) = path.strip_prefix("opencode:") {
+            let id = rest.rsplit_once('|').map(|(_, id)| id).unwrap_or(rest);
+            if id.is_empty() || id.len() > 80 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                return Err("Invalid chat id".to_string());
+            }
+            let status = cli::status("opencode")?;
+            if !status.ready {
+                return Err(status.error.unwrap_or_else(|| "OpenCode is not installed".to_string()));
+            }
+            let exe = status.path.ok_or("OpenCode path is missing")?;
+            use std::os::windows::process::CommandExt;
+            let out = Command::new(exe)
+                .args(["session", "delete", id])
+                .stdin(std::process::Stdio::null())
+                .creation_flags(0x0800_0000)
+                .output()
+                .map_err(|e| format!("Could not run OpenCode: {e}"))?;
+            if !out.status.success() {
+                let why = String::from_utf8_lossy(&out.stderr);
+                let why = why.lines().find(|l| !l.trim().is_empty()).unwrap_or("it returned an error");
+                return Err(format!("OpenCode could not delete the chat: {why}"));
+            }
+            let _ = index::forget(&path);
+            return Ok(());
+        }
+        // Gemini, Cline and Cursor keep chats as files or folders: those go to the Recycle Bin like Claude and Codex.
+        let target = if path.starts_with("gemini:") || path.starts_with("cline:") {
+            others::deletable(&path)
+        } else if path.starts_with("cursor-transcript:") || path.starts_with("cursor-cli:") {
+            cursor::deletable(&path)
+        } else {
+            None
+        };
+        if let Some(target) = target {
+            recycle(&target)?;
+            let _ = index::forget(&path);
+            return Ok(());
+        }
+        if others::is_virtual(&path) || path.starts_with("codex-db:") {
             return Err("This chat lives in the tool's own storage, so it can only be deleted there".to_string());
         }
         if path.starts_with("cursor-") {
@@ -970,7 +1054,7 @@ const EXPORT_TOOLS: [(&str, &str); 6] = [("claude", "Claude Code"), ("codex", "C
 /// Reads one chat and returns its Markdown, or None when it has nothing readable. File names depend only on the chat, so
 /// exporting again to the same folder replaces the earlier files instead of piling up copies.
 fn chat_markdown(tool: &str, tool_name: &str, id: &str, path: &str) -> Option<(String, String)> {
-    let msgs: Vec<Msg> = if is_virtual(tool) {
+    let msgs: Vec<Msg> = if is_virtual(tool, path) {
         read_virtual(tool, path).unwrap_or_default().into_iter().filter(is_readable).collect()
     } else {
         let lines = open_lines(Path::new(path))?;
@@ -1138,7 +1222,11 @@ fn ps_single_quoted_inner(text: &str) -> String {
 /// Opens a new PowerShell window in the chat's folder and starts Claude Code or Codex there.
 /// agent: claude | claude-fork | claude-handoff | codex-resume | codex-fork | codex-handoff
 #[tauri::command]
-fn launch_agent(agent: String, id: String, cwd: Option<String>, handoff: Option<String>, prompt: Option<String>) -> Result<(), String> {
+async fn launch_agent(agent: String, id: String, cwd: Option<String>, handoff: Option<String>, prompt: Option<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || launch_agent_inner(agent, id, cwd, handoff, prompt)).await.map_err(|e| e.to_string())?
+}
+
+fn launch_agent_inner(agent: String, id: String, cwd: Option<String>, handoff: Option<String>, prompt: Option<String>) -> Result<(), String> {
     let dir = cwd
         .filter(|c| Path::new(c).is_dir())
         .map(PathBuf::from)
@@ -1184,7 +1272,7 @@ fn launch_agent(agent: String, id: String, cwd: Option<String>, handoff: Option<
         "gemini-handoff" => {
             let path = handoff_path(handoff)?;
             let folder = Path::new(&path).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-            format!("gemini '{}' --include-directories '{}'", text(&path), folder)
+            format!("gemini --prompt-interactive '{}' --include-directories '{}'", text(&path), folder)
         }
         "opencode-handoff" => {
             let path = handoff_path(handoff)?;
@@ -1192,7 +1280,7 @@ fn launch_agent(agent: String, id: String, cwd: Option<String>, handoff: Option<
         }
         "cline-handoff" => {
             let path = handoff_path(handoff)?;
-            format!("cline '{}'", text(&path))
+            format!("cline --tui --auto-approve false '{}'", text(&path))
         }
         "cursor-handoff" => {
             let path = handoff_path(handoff)?;
@@ -1200,34 +1288,35 @@ fn launch_agent(agent: String, id: String, cwd: Option<String>, handoff: Option<
         }
         _ => return Err("Unknown agent".into()),
     };
+    let tool = agent.split('-').next().ok_or("Unknown agent")?;
+    let status = cli::status(tool)?;
+    if !status.ready { return Err(status.error.unwrap_or_else(|| "CLI is not installed. Use Install in the Continue menu.".into())); }
+    let path = status.path.ok_or("CLI path is missing")?;
+    let (_, arguments) = script.split_once(' ').ok_or("Missing CLI arguments")?;
+    // A script file avoids cmd.exe's short command-line limit for handoff prompts.
+    let script_path = cli::script_file("")?;
+    let receipt = script_path.with_extension("launch-error.txt");
+    fs::write(&script_path, format!("\u{feff}{}", cli::launch_script(&path, arguments, &receipt.to_string_lossy()))).map_err(|e| e.to_string())?;
     use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    // The terminal is started through `cmd /c start`, so it is not a child of ChatVault. It then stays open when
-    // ChatVault restarts, for example on every hot reload while developing, or when the app is closed.
-    let encoded = {
-        use std::fmt::Write;
-        let bytes: Vec<u8> = script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
-        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::new();
-        for c in bytes.chunks(3) {
-            let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
-            let _ = out.write_char(T[(n >> 18 & 63) as usize] as char);
-            let _ = out.write_char(T[(n >> 12 & 63) as usize] as char);
-            let _ = out.write_char(if c.len() > 1 { T[(n >> 6 & 63) as usize] as char } else { '=' });
-            let _ = out.write_char(if c.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
-        }
-        out
-    };
+    // The terminal is opened through `cmd /C start`, which creates its console properly. Starting PowerShell directly
+    // from this window-only app gave the new console no usable input or output, so full-screen tools such as
+    // OpenCode ran but drew nothing, and could not be typed into. It also keeps the terminal independent of ChatVault.
+    let shell = cli::powershell();
     Command::new("cmd")
         .arg("/C")
         .arg("start")
         .arg("")
-        .arg("powershell")
-        .args(["-NoLogo", "-NoExit", "-EncodedCommand", &encoded])
+        .arg(shell.get_program())
+        .args(["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-NoExit", "-File"])
+        .arg(&script_path)
         .current_dir(dir)
-        .creation_flags(CREATE_NO_WINDOW)
+        .creation_flags(0x0800_0000)
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Could not open terminal: {e}"))?;
+    for _ in 0..15 {
+        if let Ok(error) = fs::read_to_string(&receipt) { return Err(error); }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     Ok(())
 }
 
@@ -1289,6 +1378,62 @@ async fn restore_chats(app: AppHandle) -> Result<sync::SyncStats, String> {
 }
 
 #[tauri::command]
+async fn chat_sources() -> Result<Vec<sources::Source>, String> {
+    tauri::async_runtime::spawn_blocking(|| sources::all(true)).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_chat_source(path: String) -> Result<(), String> {
+    sources::open(&path)
+}
+
+#[tauri::command]
+fn disabled_integrations() -> Vec<String> {
+    integrations::disabled()
+}
+
+/// Switches a tool on or off. Off: its chats leave ChatVault's list and it is skipped by scans and backups. On: the list
+/// is rebuilt on the next refresh. The tool's own chats are never touched.
+#[tauri::command]
+async fn set_integration(provider: String, enabled: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        integrations::set(&provider, enabled)?;
+        if enabled {
+            index::mark_stale()
+        } else {
+            index::purge_provider(&provider)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn backup_location_info() -> backuploc::Info {
+    backuploc::info()
+}
+
+#[tauri::command]
+async fn check_backup_location(path: String) -> Result<backuploc::Check, String> {
+    tauri::async_runtime::spawn_blocking(move || backuploc::check(&path)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn set_backup_location(app: AppHandle, path: String, move_files: bool) -> Result<backuploc::MoveResult, String> {
+    tauri::async_runtime::spawn_blocking(move || backuploc::set(&app, &path, move_files)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn cancel_backup_move() {
+    backuploc::cancel();
+}
+
+#[tauri::command]
+async fn delete_previous_backup() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(backuploc::delete_previous).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn backup_status() -> Result<sync::BackupStatus, String> {
     tauri::async_runtime::spawn_blocking(sync::status).await.map_err(|e| e.to_string())
 }
@@ -1312,10 +1457,12 @@ pub fn run() {
                 }
             }
             let open = MenuItem::with_id(app, "open", "Open ChatVault", true, None::<&str>)?;
-            let sync = MenuItem::with_id(app, "sync", "Sync & backup now", true, None::<&str>)?;
+            let search = MenuItem::with_id(app, "search", "Search chats", true, Some("Ctrl+K"))?;
+            let sync = MenuItem::with_id(app, "sync", "Sync & backup…", true, None::<&str>)?;
             let rescan = MenuItem::with_id(app, "rescan", "Scan for new chats", true, None::<&str>)?;
+            let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit ChatVault", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &PredefinedMenuItem::separator(app)?, &sync, &rescan, &PredefinedMenuItem::separator(app)?, &quit])?;
+            let menu = Menu::with_items(app, &[&open, &search, &PredefinedMenuItem::separator(app)?, &sync, &rescan, &settings, &PredefinedMenuItem::separator(app)?, &quit])?;
             let mut tray = TrayIconBuilder::with_id("main")
                 .tooltip("ChatVault")
                 .menu(&menu)
@@ -1328,6 +1475,14 @@ pub fn run() {
                     }
                     "rescan" => {
                         let _ = app.emit("tray-rescan", ());
+                    }
+                    "search" => {
+                        show(app);
+                        let _ = app.emit("tray-search", ());
+                    }
+                    "settings" => {
+                        show(app);
+                        let _ = app.emit("tray-settings", ());
                     }
                     "quit" => app.exit(0),
                     _ => {}
@@ -1397,10 +1552,22 @@ pub fn run() {
             save_markdown,
             save_handoff,
             launch_agent,
+            cli::cli_status,
+            cli::install_cli,
+            cli::set_cli_path,
             account_info,
             sync_chats,
             restore_chats,
-            backup_status
+            backup_status,
+            chat_sources,
+            open_chat_source,
+            backup_location_info,
+            disabled_integrations,
+            set_integration,
+            check_backup_location,
+            set_backup_location,
+            cancel_backup_move,
+            delete_previous_backup
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

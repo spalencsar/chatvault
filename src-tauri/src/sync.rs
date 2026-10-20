@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter};
 
-static BUSY: AtomicBool = AtomicBool::new(false);
+pub(crate) static BUSY: AtomicBool = AtomicBool::new(false);
 
 #[derive(Serialize, Default)]
 pub struct SyncStats {
@@ -40,7 +40,7 @@ struct Progress {
     current: String,
 }
 
-fn walk_all(root: &Path, out: &mut Vec<PathBuf>) {
+pub(crate) fn walk_all(root: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = fs::read_dir(root) else { return };
     for e in rd.flatten() {
         let p = e.path();
@@ -57,27 +57,32 @@ fn pairs(forward: bool) -> Vec<(PathBuf, PathBuf)> {
     let Some(b) = backup_root() else { return Vec::new() };
     // (live root, backup root, filter: 0 = everything, 1 = Claude transcripts only, 2 = Cursor transcripts only, 3 = Gemini chats, 4 = OpenCode database)
     let mut maps: Vec<(PathBuf, PathBuf, u8)> = Vec::new();
-    if let Some(p) = claude_projects() {
+    let on = crate::integrations::is_enabled;
+    if let (true, Some(p)) = (on("claude"), claude_projects()) {
         maps.push((p, b.join("claude").join("projects"), 1));
     }
-    if let Some(p) = claude_meta() {
+    if let (true, Some(p)) = (on("claude"), claude_meta()) {
         maps.push((p, b.join("claude").join("sessions-meta"), 0));
     }
-    if let Some(c) = codex_home() {
+    if let (true, Some(c)) = (on("codex"), codex_home()) {
         maps.push((c.join("sessions"), b.join("codex").join("sessions"), 0));
         maps.push((c.join("archived_sessions"), b.join("codex").join("archived_sessions"), 0));
     }
     // Cursor: the plain-text agent transcripts and the CLI chat stores. The IDE database itself is not copied while Cursor may be writing to it.
-    if let Some(h) = home() {
+    if let (true, Some(h)) = (on("cursor"), home()) {
         maps.push((h.join(".cursor").join("projects"), b.join("cursor").join("projects"), 2));
         maps.push((h.join(".cursor").join("chats"), b.join("cursor").join("chats"), 0));
     }
     // Gemini CLI (chat files per project) and Cline (one folder per task). OpenCode keeps everything in one SQLite file:
     // it is copied into the backup but never written back over the live one.
     if let Some(h) = home() {
-        maps.push((h.join(".gemini").join("tmp"), b.join("gemini").join("tmp"), 3));
-        maps.push((h.join(".cline").join("data").join("sessions"), b.join("cline").join("sessions"), 0));
-        if forward {
+        if on("gemini") {
+            maps.push((h.join(".gemini").join("tmp"), b.join("gemini").join("tmp"), 3));
+        }
+        if on("cline") {
+            maps.push((h.join(".cline").join("data").join("sessions"), b.join("cline").join("sessions"), 0));
+        }
+        if forward && on("opencode") {
             let db = h.join(".local").join("share").join("opencode");
             maps.push((db, b.join("opencode"), 4));
         }
@@ -184,6 +189,9 @@ fn run(app: &AppHandle, forward: bool) -> Result<SyncStats, String> {
 
 /// session_index.jsonl holds Codex thread names. Add any thread the destination does not have yet.
 fn merge_codex_index(forward: bool) {
+    if !crate::integrations::is_enabled("codex") {
+        return;
+    }
     let (Some(c), Some(b)) = (codex_home(), backup_root()) else { return };
     let live = c.join("session_index.jsonl");
     let back = b.join("codex").join("session_index.jsonl");

@@ -2,9 +2,11 @@ import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator, CommandShortcut } from "@/components/ui/command";
 import { ProviderLogo } from "@/claude-logo";
+import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { PROVIDERS, PROVIDER_SHORT, type Chat, type Provider } from "@/chat-actions";
 
+type Hit = { id: string; snippet: string };
 
 export type PaletteAction = { id: string; label: string; icon: ReactNode; shortcut?: string; run: () => void };
 
@@ -29,6 +31,7 @@ export function CommandPalette({
   const [value, setValue] = useState("");
   const [results, setResults] = useState<Chat[]>([]);
   const [loading, setLoading] = useState(false);
+  const [snippets, setSnippets] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (!open) {
@@ -37,14 +40,37 @@ export function CommandPalette({
     }
     let stale = false;
     setLoading(true);
+    const q = value.trim();
     const t = window.setTimeout(async () => {
       try {
-        const both = await Promise.all(
-          PROVIDERS.map((p) =>
-            invoke<{ items: Chat[] }>("query_chats", { provider: p, account: "all", q: value.trim(), offset: 0, limit: 8 }).then((r) => r.items),
-          ),
+        // Same search as the sidebar: titles and projects, plus the words inside chats from the search index.
+        const per = await Promise.all(
+          PROVIDERS.map(async (p) => {
+            const [titles, words] = await Promise.all([
+              invoke<{ items: Chat[] }>("query_chats", { provider: p, account: "all", q, offset: 0, limit: q ? 30 : 8, sort: "recent", scope: "all" }).then((r) => r.items).catch(() => [] as Chat[]),
+              q.length >= 2 ? invoke<Hit[]>("deep_search", { provider: p, query: q }).catch(() => [] as Hit[]) : Promise.resolve([] as Hit[]),
+            ]);
+            const inside = words.length ? await invoke<Chat[]>("chats_by_ids", { provider: p, ids: words.slice(0, 20).map((h) => h.id) }).catch(() => [] as Chat[]) : [];
+            return { titles, inside, words };
+          }),
         );
-        if (!stale) setResults(both.flat().sort((a, b) => b.lastMs - a.lastMs).slice(0, 12));
+        if (stale) return;
+        const found: Record<string, string> = {};
+        const seen = new Set<string>();
+        const list: Chat[] = [];
+        per.forEach(({ titles, inside, words }) => {
+          words.forEach((h) => (found[h.id] = h.snippet));
+          [...titles, ...inside].forEach((c) => {
+            const k = `${c.provider}:${c.id}`;
+            if (!seen.has(k)) {
+              seen.add(k);
+              list.push(c);
+            }
+          });
+        });
+        list.sort((x, y) => y.lastMs - x.lastMs);
+        setResults(list.slice(0, 12));
+        setSnippets(found);
       } catch {
         if (!stale) setResults([]);
       } finally {
@@ -68,7 +94,10 @@ export function CommandPalette({
   const item = (c: Chat) => (
     <CommandItem key={`${c.provider}:${c.id}`} value={`${c.provider}:${c.id}`} onSelect={() => select(() => onOpenChat(c))}>
       <ProviderLogo provider={c.provider} className="size-4 shrink-0" />
-      <span className="min-w-0 flex-1 truncate">{titleOf(c)}</span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate">{titleOf(c)}</span>
+        {q && snippets[c.id] && <span className="block truncate text-xs text-muted-foreground">{snippets[c.id].replace(/<[^>]+>/g, "")}</span>}
+      </span>
     </CommandItem>
   );
 
@@ -78,6 +107,17 @@ export function CommandPalette({
         <CommandInput value={value} onValueChange={setValue} placeholder="Search chats and actions…" />
         <ScrollArea className="h-[min(420px,55dvh)]">
         <CommandList className="max-h-none overflow-visible">
+          {loading && results.length === 0 && (
+            <div className="px-1 py-1" aria-busy="true">
+              <Skeleton className="mx-2.5 mb-1 mt-2 h-3 w-20" />
+              {Array.from({ length: 5 }).map((_, i) => (
+                <div key={i} className="flex items-center gap-2.5 px-2.5 py-2">
+                  <Skeleton className="size-4 shrink-0 rounded" />
+                  <Skeleton className={`h-3.5 ${["w-3/5", "w-2/3", "w-1/2", "w-3/4", "w-2/5"][i]}`} />
+                </div>
+              ))}
+            </div>
+          )}
           {!loading && results.length === 0 && shownActions.length === 0 && shownPinned.length === 0 && <CommandEmpty>No results found.</CommandEmpty>}
           {shownPinned.length > 0 && (
             <CommandGroup heading={`Pinned · ${PROVIDER_SHORT[provider]}`}>{shownPinned.map(item)}</CommandGroup>

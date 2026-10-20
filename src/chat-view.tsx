@@ -65,7 +65,7 @@ import { cn } from "@/lib/utils";
 import { ProviderLogo } from "@/claude-logo";
 import { MessageBody } from "@/message-body";
 import { Highlight, textHas } from "@/highlight";
-import { PROVIDER_SHORT, chatActions, continueTargets, COPY_CONTENT_IDS, isHandoffOnly, fmtDate, fmtSize, prettyTitle, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
+import { PROVIDER_SHORT, chatActions, continueTargets, COPY_CONTENT_IDS, deleteKind, fmtDate, fmtSize, prettyTitle, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
 import { HeaderSkeleton, MessagesSkeleton } from "@/skeletons";
 import { PlanBlock, StepItem, SubagentBlock, isAgent, isPlan, mergeResults, stepName, type Item } from "@/steps";
 
@@ -518,7 +518,7 @@ export function ChatView(p: Props) {
     const open = acts.filter((a) => a.group === "Open");
     if (open.length) out.push({ type: "sub", label: "Open", icon: <FolderOpen strokeWidth={1.5} />, entries: open.map((a) => asEntry(a)) });
     if (p.onRefresh) out.push({ type: "item", label: "Refresh", icon: <RefreshCw strokeWidth={1.5} />, onSelect: p.onRefresh });
-    if (!isHandoffOnly(chat.provider)) out.push({ type: "sep" }, { type: "item", label: "Delete chat", icon: <Trash2 strokeWidth={1.5} />, danger: true, onSelect: p.onDelete });
+    out.push({ type: "sep" }, { type: "item", label: "Delete chat", icon: <Trash2 strokeWidth={1.5} />, danger: deleteKind(chat) !== "blocked", muted: deleteKind(chat) === "blocked", onSelect: p.onDelete });
     return out;
   };
 
@@ -560,8 +560,8 @@ export function ChatView(p: Props) {
                   chat.model ? { icon: Cpu, label: chat.model } : null,
                   chat.backup ? { icon: Archive, label: "Backup copy" } : null,
                   { icon: Clock, label: fmtDate(chat.lastMs) },
-                  { icon: HardDrive, label: fmtSize(chat.size) },
-                  { icon: MessageSquare, label: page.partial ? "Loading messages…" : `${page.total.toLocaleString()} messages` },
+                  { icon: HardDrive, label: chat.path.startsWith("codex-db:") ? "Database storage" : fmtSize(chat.size) },
+                  { icon: MessageSquare, label: page.partial ? "Loading transcript…" : `${page.total.toLocaleString()} transcript entries` },
                 ]
                   .filter((m): m is { icon: typeof Cpu; label: string } => m !== null)
                   .map((m) => (
@@ -832,14 +832,10 @@ function ActionsMenu({ chat, msgs, toast, onRename, onDelete, pinned, onTogglePi
             </DropdownMenuGroup>
           </>
         )}
-        {!isHandoffOnly(chat.provider) && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem variant="destructive" onClick={onDelete}>
-              <Trash2 className="size-4" strokeWidth={1.5} /> Delete chat
-            </DropdownMenuItem>
-          </>
-        )}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem variant={deleteKind(chat) === "blocked" ? "default" : "destructive"} className={deleteKind(chat) === "blocked" ? "opacity-50" : undefined} onClick={onDelete}>
+          <Trash2 className="size-4" strokeWidth={1.5} /> Delete chat
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

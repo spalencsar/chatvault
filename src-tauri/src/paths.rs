@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 pub fn env_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os(name).map(PathBuf::from)
+    std::env::var_os(name).filter(|v|!v.is_empty()).map(PathBuf::from)
 }
 
 pub fn home() -> Option<PathBuf> {
@@ -13,7 +13,7 @@ pub fn home() -> Option<PathBuf> {
 }
 
 pub fn claude_projects() -> Option<PathBuf> {
-    home().map(|p| p.join(".claude").join("projects"))
+    env_path("CLAUDE_CONFIG_DIR").or_else(|| home().map(|p|p.join(".claude"))).map(|p|p.join("projects"))
 }
 
 pub fn claude_meta() -> Option<PathBuf> {
@@ -21,11 +21,39 @@ pub fn claude_meta() -> Option<PathBuf> {
 }
 
 pub fn codex_home() -> Option<PathBuf> {
-    home().map(|p| p.join(".codex"))
+    env_path("CODEX_HOME").or_else(||home().map(|p| p.join(".codex")))
 }
 
+pub fn codex_roots() -> Vec<PathBuf> {
+    unique_roots([codex_home(),home().map(|p|p.join(".codex"))])
+}
+
+pub fn claude_project_roots() -> Vec<PathBuf> {
+    unique_roots([claude_projects(),home().map(|p|p.join(".claude/projects"))])
+}
+
+fn unique_roots(candidates:impl IntoIterator<Item=Option<PathBuf>>) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for p in candidates.into_iter().flatten() {
+        if !roots.contains(&p) { roots.push(p); }
+    }
+    roots
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn custom_and_default_user_locations_are_both_kept_without_duplicates() {
+        let default=PathBuf::from(r"D:\Users\Other User\非ASCII\.codex");
+        let custom=PathBuf::from(r"E:\Agent profiles\work");
+        assert_eq!(unique_roots([Some(custom.clone()),Some(default.clone()),Some(custom.clone()),None]),vec![custom,default]);
+    }
+}
+
+/// Where the backup lives: the folder the user chose, or Documents\ChatVault Backup (see `backuploc`).
 pub fn backup_root() -> Option<PathBuf> {
-    home().map(|p| p.join("Documents").join("ChatVault Backup"))
+    crate::backuploc::custom().or_else(crate::backuploc::default_root)
 }
 
 pub fn data_dir() -> Option<PathBuf> {
@@ -57,13 +85,10 @@ pub fn check_transcript(path: &str) -> Result<PathBuf, String> {
     if canon.extension().map(|e| e != "jsonl" && e != "zst").unwrap_or(true) {
         return Err("That file is not a chat transcript".into());
     }
-    let roots = [
-        claude_projects(),
-        codex_home().map(|c| c.join("sessions")),
-        codex_home().map(|c| c.join("archived_sessions")),
-        backup_root(),
-    ];
-    for r in roots.into_iter().flatten() {
+    let mut roots = claude_project_roots();
+    for c in codex_roots() { roots.extend([c.join("sessions"),c.join("archived_sessions")]); }
+    roots.extend(backup_root());
+    for r in roots {
         if let Ok(r) = r.canonicalize() {
             if canon.starts_with(&r) {
                 return Ok(canon);

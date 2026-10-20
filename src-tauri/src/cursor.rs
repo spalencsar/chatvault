@@ -28,21 +28,61 @@ fn global_db() -> Option<PathBuf> {
     appdata_cursor().map(|p| p.join("globalStorage").join("state.vscdb"))
 }
 
+/// The email Cursor is signed in with. Only that one entry is read; the sign-in tokens next to it are never touched.
+pub fn account_email() -> Option<String> {
+    let c = open_ro(&global_db()?)?;
+    let v: String = c.query_row("SELECT value FROM ItemTable WHERE key='cursorAuth/cachedEmail'", [], |r| r.get(0)).ok()?;
+    let v = v.trim().trim_matches('"').to_string();
+    v.contains('@').then_some(v)
+}
+
+fn ide_dbs() -> Vec<PathBuf> {
+    let mut out=Vec::new();
+    let Some(user)=appdata_cursor() else{return out};
+    let mut users=vec![user.clone()];users.extend(subdirs(&user.join("profiles")));
+    for user in users {
+        let global=user.join("globalStorage/state.vscdb");
+        if global.is_file(){out.push(global);}
+        for ws in subdirs(&user.join("workspaceStorage")) {
+            let p=ws.join("state.vscdb");if p.is_file(){out.push(p);}
+        }
+    }
+    out
+}
+
+/// Where Cursor's chats are read from: (what it is, folder or file, how many chats are in it).
+pub fn locations() -> Vec<(String, PathBuf, Option<usize>)> {
+    let mut out = Vec::new();
+    if let Some(g) = global_db() {
+        out.push(("Editor chats (database)".to_string(), g, None));
+    }
+    if let Some(ws) = appdata_cursor().map(|u| u.join("workspaceStorage")) {
+        let n = ide_dbs().iter().filter(|p| p.starts_with(&ws)).count();
+        out.push((format!("Editor chats per project ({n} databases)"), ws, None));
+    }
+    if let Some(r) = cli_root() {
+        out.push(("Cursor Agent chats".to_string(), r, Some(cli_stores().len())));
+    }
+    if let Some(r) = home().map(|h| h.join(".cursor/projects")) {
+        out.push(("Saved agent transcripts".to_string(), r, Some(transcript_files().len())));
+    }
+    out
+}
+
 fn cli_root() -> Option<PathBuf> {
     home().map(|p| p.join(".cursor").join("chats"))
 }
 
 /// Opens a database that Cursor may be using, without taking any lock on it.
 fn open_ro(path: &Path) -> Option<Connection> {
-    let p = path.to_string_lossy().replace('\\', "/").replace(' ', "%20").replace('#', "%23");
     // Cursor writes new messages to the database's write-ahead log first. Reading normally includes them;
     // "immutable" would ignore the log and miss everything newer than the last checkpoint.
-    if let Ok(c) = Connection::open_with_flags(format!("file:{}?mode=ro", p), OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_READ_ONLY) {
+    if let Ok(c) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
         if c.query_row("SELECT 1 FROM sqlite_master LIMIT 1", [], |r| r.get::<_, i64>(0)).is_ok() {
             return Some(c);
         }
     }
-    Connection::open_with_flags(format!("file:{}?mode=ro&immutable=1", p), OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
+    None
 }
 
 fn mtime_ms(p: &Path) -> i64 {
@@ -105,9 +145,11 @@ fn first_user_bubble(c: &Connection, composer: &str, headers: &[Value]) -> Optio
 }
 
 fn scan_ide(out: &mut Vec<CursorChat>) {
-    let Some(db) = global_db() else { return };
-    let Some(c) = open_ro(&db) else { return };
-    let mtime = mtime_ms(&db);
+    for db in ide_dbs() {scan_ide_db(&db,out);}
+}
+fn scan_ide_db(db:&Path,out:&mut Vec<CursorChat>) {
+    let Some(c) = open_ro(db) else { return };
+    let mtime = mtime_ms(db);
     // Workspace and update times live in a separate headers table.
     let mut heads = std::collections::HashMap::<String, (Option<String>, Option<i64>)>::new();
     if let Ok(mut st) = c.prepare("SELECT composerId, workspaceId, lastUpdatedAt FROM composerHeaders") {
@@ -132,7 +174,7 @@ fn scan_ide(out: &mut Vec<CursorChat>) {
         let created = d.get("createdAt").and_then(|x| x.as_i64());
         let cwd = ws.as_deref().filter(|w| *w != "empty-window").and_then(workspace_folder);
         out.push(CursorChat {
-            path: format!("cursor-ide:{}", id),
+            path: format!("cursor-ide:{}|{}", db.display(), id),
             id,
             title,
             cwd,
@@ -157,6 +199,35 @@ fn cli_stores() -> Vec<PathBuf> {
         }
     }
     out
+}
+
+fn transcript_files() -> Vec<PathBuf> {
+    let mut out=Vec::new();
+    if let Some(root)=home().map(|h|h.join(".cursor/projects")) {
+        for project in subdirs(&root) {walk_files(&project.join("agent-transcripts"), &["jsonl"], &mut out);}
+    }
+    out
+}
+fn transcript_messages(path:&Path) -> Vec<Msg> {
+    let Some(lines)=open_lines(path) else {return Vec::new()};
+    let mut out=Vec::new();
+    for line in lines {
+        let Ok(mut v)=serde_json::from_str::<Value>(&line) else {continue};
+        let role=v.get("role").and_then(Value::as_str).unwrap_or("").to_string();
+        v["type"]=Value::String(role);
+        for mut m in crate::providers::claude_messages(&v) {
+            if m.role=="user" && m.kind=="text" {m.text=user_query(&m.text);}
+            out.push(m);
+        }
+    }
+    out
+}
+fn scan_transcripts(out:&mut Vec<CursorChat>) {
+    for p in transcript_files() {
+        let msgs=transcript_messages(&p);
+        let Some(first)=msgs.iter().find(|m|m.role=="user" && m.kind=="text") else {continue};
+        out.push(CursorChat {id:p.file_stem().map(|s|s.to_string_lossy().to_string()).unwrap_or_default(),title:clip(&first.text,80),cwd:None,created_ms:None,last_ms:mtime_ms(&p),size:fs::metadata(&p).map(|m|m.len() as i64).unwrap_or(0),path:format!("cursor-transcript:{}",p.display()),mtime:mtime_ms(&p)});
+    }
 }
 
 fn content_text(v: &Value) -> String {
@@ -246,25 +317,34 @@ pub fn scan() -> Vec<CursorChat> {
     let mut out = Vec::new();
     scan_ide(&mut out);
     scan_cli(&mut out);
+    scan_transcripts(&mut out);
+    out.sort_by_key(|chat|std::cmp::Reverse(chat.last_ms));
+    let mut ids=std::collections::HashSet::new();
+    out.retain(|chat|ids.insert(chat.id.clone()));
     out
 }
 
 /// A fingerprint of the Cursor files, so the index can skip a rescan when nothing changed.
 pub fn fingerprint() -> i64 {
-    let a = global_db()
+    let a = ide_dbs().into_iter()
         .map(|p| {
             let mut wal = p.clone().into_os_string();
             wal.push("-wal");
             mtime_ms(&p).max(mtime_ms(Path::new(&wal)))
         })
-        .unwrap_or(0);
+        .max().unwrap_or(0);
     let b = cli_stores().iter().map(|p| mtime_ms(p)).max().unwrap_or(0);
-    a.max(b)
+    a.max(b).max(transcript_files().iter().map(|p|mtime_ms(p)).max().unwrap_or(0))
 }
 
 /// The real file behind a virtual cursor path, for "show file".
 pub fn real_file(path: &str) -> Option<PathBuf> {
-    if path.starts_with("cursor-ide:") {
+    if let Some(file)=path.strip_prefix("cursor-transcript:") {
+        let canon=Path::new(file).canonicalize().ok()?;
+        return transcript_files().into_iter().find(|p|p.canonicalize().ok().as_ref()==Some(&canon));
+    }
+    if let Some(key)=path.strip_prefix("cursor-ide:") {
+        if let Some((db,_))=key.rsplit_once('|') {return ide_dbs().into_iter().find(|p|p==Path::new(db));}
         return global_db();
     }
     let p = PathBuf::from(path.strip_prefix("cursor-cli:")?);
@@ -273,9 +353,26 @@ pub fn real_file(path: &str) -> Option<PathBuf> {
     canon.starts_with(root).then_some(canon)
 }
 
+/// What deleting a Cursor chat removes: a transcript file, or the folder of a Cursor Agent chat. Chats kept inside
+/// Cursor's own database are not touched, so those return nothing.
+pub fn deletable(path: &str) -> Option<PathBuf> {
+    if path.starts_with("cursor-transcript:") {
+        return real_file(path);
+    }
+    if path.starts_with("cursor-cli:") {
+        let store = real_file(path)?;
+        let folder = store.parent()?.to_path_buf();
+        let root = cli_root()?.canonicalize().ok()?;
+        return (folder != root && folder.starts_with(&root)).then_some(folder);
+    }
+    None
+}
+
 pub fn read(path: &str) -> Result<Vec<Msg>, String> {
+    if path.starts_with("cursor-transcript:") {return Ok(transcript_messages(&real_file(path).ok_or("That Cursor transcript is not available")?));}
     if let Some(id) = path.strip_prefix("cursor-ide:") {
-        let db = global_db().ok_or("Cursor is not installed")?;
+        let db = real_file(path).ok_or("Cursor is not installed")?;
+        let id=id.rsplit_once('|').map(|(_,id)|id).unwrap_or(id);
         let c = open_ro(&db).ok_or("Cannot open the Cursor database")?;
         let raw: String = c
             .query_row("SELECT value FROM cursorDiskKV WHERE key=?1", [format!("composerData:{}", id)], |r| r.get(0))
@@ -304,4 +401,16 @@ pub fn read(path: &str) -> Result<Vec<Msg>, String> {
     }
     let store = real_file(path).ok_or("That is not a Cursor chat")?;
     Ok(cli_messages(&store))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn exported_agent_transcript_reads_both_roles() {
+        let path=crate::cli::script_file("").unwrap().with_extension("jsonl");
+        fs::write(&path,"{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"<user_query>fixture question</user_query>\"}]}}\n{\"role\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"fixture answer\"}]}}\n").unwrap();
+        let msgs=transcript_messages(&path);assert_eq!(msgs.len(),2);assert_eq!(msgs[0].text,"fixture question");assert_eq!(msgs[1].role,"assistant");
+        assert!(real_file("cursor-transcript:C:\\outside\\test.jsonl").is_none());
+    }
 }

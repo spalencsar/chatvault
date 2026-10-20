@@ -25,6 +25,22 @@ export function usePersisted<T>(key: string, initial: T) {
 export const chatKey = (c: { provider: string; id: string }) => `${c.provider}:${c.id}`;
 
 /** Pinned chats and custom names, both kept on this PC only. */
+/** Names you gave to accounts, kept on this PC. An account without one shows its email or id. */
+export function useAccountNames() {
+  const [accountNames, setNames] = usePersisted<Record<string, string>>("chatvault.accountNames", {});
+  const renameAccount = useCallback(
+    (id: string, name: string) =>
+      setNames((n) => {
+        const next = { ...n };
+        if (name.trim()) next[id] = name.trim();
+        else delete next[id];
+        return next;
+      }),
+    [setNames],
+  );
+  return { accountNames, renameAccount };
+}
+
 export function useChatMeta() {
   const [pins, setPins] = usePersisted<string[]>("chatvault.pins", []);
   const [names, setNames] = usePersisted<Record<string, string>>("chatvault.names", {});

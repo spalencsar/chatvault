@@ -83,6 +83,7 @@ pub fn open_db() -> Result<Connection, String> {
          CREATE TABLE IF NOT EXISTS chat_tags(provider TEXT NOT NULL, id TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY(provider, id, tag));
          CREATE VIRTUAL TABLE IF NOT EXISTS chat_bodies USING fts5(key UNINDEXED, body, tokenize='unicode61 remove_diacritics 2');
          CREATE TABLE IF NOT EXISTS body_state(key TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS source_state(name TEXT PRIMARY KEY, value TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS backed_up(provider TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY(provider, id));
          CREATE INDEX IF NOT EXISTS chats_last ON chats(provider, last_ms DESC);
          CREATE INDEX IF NOT EXISTS chats_acct ON chats(provider, account, last_ms DESC);
@@ -134,13 +135,17 @@ fn collect_files() -> Vec<Found> {
         }
         v.extend(files.into_iter().map(|path| Found { provider, path, backup }));
     };
-    add("claude", claude_projects(), false, 1);
-    add("codex", codex_home().map(|c| c.join("sessions")), false, 9);
-    add("codex", codex_home().map(|c| c.join("archived_sessions")), false, 9);
+    for root in claude_project_roots() { add("claude", Some(root), false, 1); }
+    for root in codex_roots() {
+        add("codex", Some(root.join("sessions")), false, 9);
+        add("codex", Some(root.join("archived_sessions")), false, 9);
+    }
     let b = backup_root();
     add("claude", b.as_ref().map(|b| b.join("claude").join("projects")), true, 1);
     add("codex", b.as_ref().map(|b| b.join("codex").join("sessions")), true, 9);
     add("codex", b.as_ref().map(|b| b.join("codex").join("archived_sessions")), true, 9);
+    // A tool that is switched off is not looked at.
+    v.retain(|f| crate::integrations::is_enabled(f.provider));
     v
 }
 
@@ -422,7 +427,7 @@ pub fn files_fingerprint() -> (usize, i64) {
     let files = collect_files();
     let newest = files.iter().map(|f| mtime_ms(&f.path).1).max().unwrap_or(0);
     // Gemini CLI, OpenCode and Cline writes count as changes too.
-    (files.len(), newest.max(crate::others::fingerprint()))
+    (files.len(), newest.max(crate::others::fingerprint()).max(crate::codex_db::fingerprint()))
 }
 
 pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
@@ -431,6 +436,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
     }
     let result = (|| {
         let mut c = open_db()?;
+        let source_upgrade = c.query_row("SELECT value FROM source_state WHERE name='local_sources'",[],|r|r.get::<_,String>(0)).ok().as_deref()!=Some("4");
         // Rows saved with a raw encoded folder name are rebuilt once so they get the readable project name.
         let _ = c.execute("DELETE FROM chats WHERE provider='claude' AND project LIKE 'C--%'", []);
         // Chats without desktop-app records are rebuilt once so they pick up the folder found in the transcript.
@@ -446,9 +452,11 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
         let seen: HashSet<String> = files.iter().map(|f| f.path.to_string_lossy().to_string()).collect();
         let cmeta = load_claude_meta();
         let cindex = load_codex_index();
+        let native_chats = if crate::integrations::is_enabled("codex") { crate::codex_db::scan() } else { Vec::new() };
+        let native_ids:HashSet<String>=native_chats.iter().map(|ch|ch.id.clone()).collect();
 
         let tx = c.transaction().map_err(|e| e.to_string())?;
-        for (path, _) in known.iter().filter(|(p, _)| !seen.contains(*p) && !p.starts_with("cursor-") && !Path::new(p).exists()) {
+        for (path, _) in known.iter().filter(|(p, _)| !seen.contains(*p) && !p.starts_with("cursor-") && !p.starts_with("codex-db:") && !Path::new(p).exists()) {
             let _ = tx.execute(
                 "DELETE FROM chats_fts WHERE key IN (SELECT provider||':'||id FROM chats WHERE path=?1)",
                 params![path],
@@ -497,6 +505,10 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
         // Live files first so a live copy always wins over its backup.
         let mut todo: Vec<&Found> = Vec::new();
         for f in &files {
+            if f.provider=="codex" {
+                let stem=f.path.file_stem().map(|s|s.to_string_lossy().trim_end_matches(".jsonl").to_string()).unwrap_or_default();
+                if stem.len()>=36 && stem.get(stem.len()-36..).is_some_and(|id|native_ids.contains(id)) {continue;}
+            }
             let (size, mtime) = mtime_ms(&f.path);
             let key = f.path.to_string_lossy().to_string();
             let unchanged = known.get(&key).map(|k| *k == (size, mtime)).unwrap_or(false);
@@ -520,6 +532,23 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
         }
         tx.commit().map_err(|e| e.to_string())?;
 
+        // Current Codex history lives in SQLite, including chats whose old rollout is gone.
+        // A live database entry wins over an older transcript/backup with the same id.
+        let native_paths: HashSet<String> = native_chats.iter().map(|c|c.path.clone()).collect();
+        let tx = c.transaction().map_err(|e|e.to_string())?;
+        for path in known.keys().filter(|p|p.starts_with("codex-db:") && !native_paths.contains(*p)) {
+            let _ = tx.execute("DELETE FROM chats_fts WHERE key IN (SELECT provider||':'||id FROM chats WHERE path=?1)",[path]);
+            let _ = tx.execute("DELETE FROM chats WHERE path=?1",[path]);
+        }
+        for ch in native_chats {
+            if !source_upgrade && known.get(&ch.path)==Some(&(0,ch.updated)) {continue;}
+            let row = Row { s: ChatSummary { provider:"codex".into(),id:ch.id,local_id:None,title:ch.title.clone(),account:ch.account,
+                project:project_of(&ch.cwd,"Codex"),cwd:ch.cwd,created_ms:Some(ch.created),last_ms:ch.updated,archived:ch.archived,
+                size:0,path:ch.path,model:ch.model,has_metadata:true,backup:false,user_archived:false }, mtime:ch.updated,preview:ch.title };
+            let _ = upsert(&tx,&row,true);
+        }
+        tx.commit().map_err(|e|e.to_string())?;
+
         // Claude titles live in metadata files that change without the transcript changing.
         let tx = c.transaction().map_err(|e| e.to_string())?;
         for (id, m) in &cmeta {
@@ -534,8 +563,8 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
         {
             let ofp = crate::others::fingerprint();
             let olast: i64 = c.query_row("SELECT COALESCE(MAX(mtime),0) FROM chats WHERE provider IN ('gemini','opencode','cline')", [], |r| r.get(0)).unwrap_or(0);
-            if ofp > 0 && ofp != olast {
-                let chats = crate::others::scan();
+            if source_upgrade || (ofp > 0 && ofp != olast) {
+                let chats: Vec<_> = crate::others::scan().into_iter().filter(|c| crate::integrations::is_enabled(c.provider)).collect();
                 let tx = c.transaction().map_err(|e| e.to_string())?;
                 let _ = tx.execute("DELETE FROM chats_fts WHERE key IN (SELECT provider||':'||id FROM chats WHERE provider IN ('gemini','opencode','cline'))", []);
                 let _ = tx.execute("DELETE FROM chats WHERE provider IN ('gemini','opencode','cline')", []);
@@ -546,7 +575,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
                             id: ch.id,
                             local_id: None,
                             title: ch.title.clone(),
-                            account: "local".into(),
+                            account: if ch.provider == "gemini" { crate::others::gemini_account().unwrap_or_else(|| "local".into()) } else { "local".into() },
                             project: project_of(&ch.cwd, ch.provider),
                             cwd: ch.cwd,
                             created_ms: ch.created_ms,
@@ -570,8 +599,9 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
 
         let fp = crate::cursor::fingerprint();
         let last: i64 = c.query_row("SELECT COALESCE(MAX(mtime),0) FROM chats WHERE provider='cursor'", [], |r| r.get(0)).unwrap_or(0);
-        if fp > 0 && fp != last {
-            let chats = crate::cursor::scan();
+        if source_upgrade || (fp > 0 && fp != last) {
+            let chats = if crate::integrations::is_enabled("cursor") { crate::cursor::scan() } else { Vec::new() };
+            let cursor_account = crate::cursor::account_email();
             let tx = c.transaction().map_err(|e| e.to_string())?;
             let _ = tx.execute("DELETE FROM chats_fts WHERE key IN (SELECT provider||':'||id FROM chats WHERE provider='cursor')", []);
             let _ = tx.execute("DELETE FROM chats WHERE provider='cursor'", []);
@@ -582,7 +612,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
                         id: ch.id,
                         local_id: None,
                         title: ch.title.clone(),
-                        account: "local".into(),
+                        account: cursor_account.clone().unwrap_or_else(|| "local".into()),
                         project: project_of(&ch.cwd, "Cursor"),
                         cwd: ch.cwd,
                         created_ms: ch.created_ms,
@@ -603,6 +633,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
             tx.commit().map_err(|e| e.to_string())?;
         }
         if let Some(a) = app { let _ = a.emit("index-progress", Progress { phase: "Done".into(), done: total, total }); }
+        c.execute("INSERT OR REPLACE INTO source_state(name,value) VALUES('local_sources','4')",[]).map_err(|e|e.to_string())?;
         Ok(())
     })();
     REFRESHING.store(false, Ordering::SeqCst);
@@ -801,7 +832,9 @@ pub fn index_bodies(app: Option<&AppHandle>) -> Result<(), String> {
             let key = format!("{provider}:{id}");
             let mut body = String::new();
             let mut msgs: Vec<Msg> = Vec::new();
-            if provider == "cursor" {
+            if provider == "codex" && path.starts_with("codex-db:") {
+                msgs = crate::codex_db::read(path).unwrap_or_default();
+            } else if provider == "cursor" {
                 msgs = crate::cursor::read(path).unwrap_or_default();
             } else if matches!(provider.as_str(), "gemini" | "opencode" | "cline") {
                 msgs = crate::others::read(path).unwrap_or_default();
@@ -873,6 +906,35 @@ pub fn search_bodies(provider: &str, q: &str, limit: i64) -> Result<Vec<(String,
         .flatten()
         .collect();
     Ok(v)
+}
+
+/// Drops every chat whose file is inside `folder` from the list, for example after the backup folder moved.
+pub fn forget_under(folder: &str) -> Result<(), String> {
+    let c = open_db()?;
+    let n = folder.chars().count() as i64;
+    c.execute(
+        "DELETE FROM chats_fts WHERE key IN (SELECT provider||':'||id FROM chats WHERE substr(path,1,?2)=?1)",
+        params![folder, n],
+    )
+    .map_err(|e| e.to_string())?;
+    c.execute("DELETE FROM chats WHERE substr(path,1,?2)=?1", params![folder, n]).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Removes a tool's chats from ChatVault's list (the list is only a copy of what the tool keeps; the tool's own chats
+/// are not touched, and notes such as tags and pins are kept).
+pub fn purge_provider(provider: &str) -> Result<(), String> {
+    let c = open_db()?;
+    c.execute("DELETE FROM chats_fts WHERE key IN (SELECT provider||':'||id FROM chats WHERE provider=?1)", params![provider]).map_err(|e| e.to_string())?;
+    c.execute("DELETE FROM chats WHERE provider=?1", params![provider]).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Makes the next refresh read every source again, for example after a tool was switched back on.
+pub fn mark_stale() -> Result<(), String> {
+    let c = open_db()?;
+    c.execute("INSERT OR REPLACE INTO source_state(name,value) VALUES('local_sources','0')", []).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 pub fn forget(path: &str) -> Result<(), String> {

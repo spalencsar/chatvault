@@ -1,31 +1,50 @@
 import { notifyError } from "@/toast";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { DatabaseBackup, FileDown, FolderOpen, Info, Loader2, RefreshCw, RotateCcw, UploadCloud } from "lucide-react";
+import { DatabaseBackup, FileDown, FolderInput, FolderOpen, HardDrive, Info, Loader2, RefreshCw, RotateCcw, Trash2, TriangleAlert, UploadCloud } from "lucide-react";
+import { open as pickFolder } from "@tauri-apps/plugin-dialog";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fmtDate, fmtSize } from "@/chat-actions";
 import { startBulkExport, useBulkExport } from "@/bulk-export";
+import { PanelHeader, RAIL_TAB, RailLabel } from "@/rail";
 import { AUTO_SYNC_KEY } from "@/store";
 
 type Status = { path: string; exists: boolean; files: number; bytes: number; lastSyncMs: number | null };
 type Stats = { copied: number; skipped: number; failed: number; bytes: number; total: number };
 type Prog = { phase: string; done: number; total: number; current: string };
+type Where = { path: string; isDefault: boolean; defaultPath: string; previous: string | null; available: boolean };
+type Check = { path: string; filesToMove: number; bytesToMove: number; isExistingBackup: boolean };
 
 export { AUTO_SYNC_KEY } from "@/store";
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 px-3.5 py-2.5">
+      <p className="text-[11px] text-muted-foreground">{label}</p>
+      <p className="mt-0.5 whitespace-nowrap text-sm font-medium">{value}</p>
+    </div>
+  );
+}
 
 export function SyncDialog({
   open,
   onOpenChange,
   onChanged,
+  onMove,
   toast,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   onChanged: () => void;
+  /** A new backup folder was chosen and checked; the confirm step opens in its own dialog. */
+  onMove: (c: Check) => void;
   toast: (m: string) => void;
 }) {
   const [status, setStatus] = useState<Status | null>(null);
@@ -34,9 +53,13 @@ export function SyncDialog({
   const [last, setLast] = useState<string | null>(null);
   const exp = useBulkExport();
   const [auto, setAuto] = useState(() => localStorage.getItem(AUTO_SYNC_KEY) !== "0");
+  const [where, setWhere] = useState<Where | null>(null);
+  const [removing, setRemoving] = useState(false);
+  const [tab, setTab] = useState<string>("backup");
 
   const load = useCallback(() => {
     invoke<Status>("backup_status").then(setStatus).catch(() => {});
+    invoke<Where>("backup_location_info").then(setWhere).catch(() => {});
   }, []);
   useEffect(() => {
     if (open) {
@@ -51,6 +74,43 @@ export function SyncDialog({
     };
   }, []);
 
+  /** Checks a folder for the backup. Nothing changes until the choice is confirmed. */
+  const propose = async (path: string) => {
+    const c = await invoke<Check>("check_backup_location", { path });
+    setLast(null);
+    // Sync & backup closes; the confirm step opens on its own, and this one comes back when it is finished.
+    onOpenChange(false);
+    onMove(c);
+  };
+  const chooseFolder = async () => {
+    try {
+      const picked = await pickFolder({ directory: true, multiple: false, title: "Choose the backup folder", defaultPath: status?.path || undefined });
+      if (typeof picked === "string") await propose(picked);
+    } catch (e) {
+      notifyError(e);
+    }
+  };
+  const useDefaultFolder = async () => {
+    if (!where) return;
+    try {
+      await propose(where.defaultPath);
+    } catch (e) {
+      notifyError(e);
+    }
+  };
+  const removePrevious = async () => {
+    setRemoving(true);
+    try {
+      await invoke("delete_previous_backup");
+      toast("The old backup folder is in the Recycle Bin");
+      load();
+    } catch (e) {
+      notifyError(e);
+    } finally {
+      setRemoving(false);
+    }
+  };
+
   const run = async (kind: "sync" | "restore") => {
     setBusy(kind);
     setProg(null);
@@ -59,7 +119,7 @@ export function SyncDialog({
       setLast(
         `${kind === "sync" ? "Copied" : "Restored"} ${s.copied} files (${fmtSize(s.bytes)}). ${s.skipped} were already up to date.${s.failed ? ` ${s.failed} could not be copied.` : ""}`,
       );
-      toast(kind === "sync" ? "Chats synced to Documents" : "Missing chats restored");
+      toast(kind === "sync" ? "Chats synced to the backup folder" : "Missing chats restored");
       load();
       onChanged();
     } catch (e) {
@@ -70,115 +130,191 @@ export function SyncDialog({
   };
 
   const pct = prog && prog.total ? Math.round((prog.done / prog.total) * 100) : 0;
+  const icon = "size-4 text-muted-foreground";
 
   return (
     <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
-      <DialogContent className="max-h-[90dvh] overflow-y-auto overflow-x-hidden sm:max-w-lg">
-        <DialogHeader>
-          <div className="flex items-start gap-3">
+      <DialogContent className="flex max-h-[min(88dvh,40rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
+        <DialogHeader className="border-b px-5 py-3.5">
+          <div className="flex items-center gap-3">
             <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
-              <DatabaseBackup className="size-4 text-muted-foreground" strokeWidth={1.5} />
+              <DatabaseBackup className={icon} strokeWidth={1.5} />
             </div>
             <div className="min-w-0">
               <DialogTitle className="text-base font-medium">Sync &amp; backup</DialogTitle>
-              <DialogDescription>Keep a copy of your chats in Documents.</DialogDescription>
+              <DialogDescription>Keep a copy of your chats outside the tools.</DialogDescription>
             </div>
           </div>
         </DialogHeader>
 
-        <div className="min-w-0 space-y-3">
-          <div className="rounded-lg border bg-muted/40 p-3 text-sm">
-            <Row
-              label="Backup folder"
-              value={
-                <span className="inline-flex items-start gap-1">
-                  <span>{status?.path || "…"}</span>
-                  <Button variant="ghost" size="icon" className="-my-1 size-6 shrink-0 text-muted-foreground" aria-label="Open the backup folder" onClick={() => invoke("open_backup_folder").catch((e) => toast(String(e)))}>
-                    <FolderOpen className="size-3.5" />
-                  </Button>
-                </span>
-              }
-              mono
-            />
-            <Row label="Files" value={status ? `${status.files.toLocaleString()} · ${fmtSize(status.bytes)}` : "…"} />
-            <Row label="Last sync" value={status?.lastSyncMs ? fmtDate(status.lastSyncMs) : "Never"} />
-          </div>
+        <Tabs orientation="vertical" value={tab} onValueChange={(v) => setTab(String(v))} className="min-h-0 flex-1 flex-col gap-0 sm:flex-row">
+          <ScrollArea className="shrink-0 border-b sm:w-52 sm:border-b-0 sm:border-r" viewportClassName="max-h-[min(70dvh,32rem)]">
+            <TabsList variant="line" className="h-auto w-full flex-col items-stretch gap-0.5 p-2" aria-label="Sync and backup sections">
+              <RailLabel first>Backup</RailLabel>
+              <TabsTrigger value="backup" className={RAIL_TAB}>
+                <HardDrive className="size-4 shrink-0" strokeWidth={1.5} /> Backup folder
+              </TabsTrigger>
+              <TabsTrigger value="restore" className={RAIL_TAB}>
+                <RotateCcw className="size-4 shrink-0" strokeWidth={1.5} /> Restore
+              </TabsTrigger>
+              <TabsTrigger value="auto" className={RAIL_TAB}>
+                <RefreshCw className="size-4 shrink-0" strokeWidth={1.5} />
+                <span className="min-w-0 flex-1 truncate text-left">Automatic</span>
+                <span className="shrink-0 text-[10px] text-muted-foreground">{auto ? "On" : "Off"}</span>
+              </TabsTrigger>
+              <RailLabel>Files</RailLabel>
+              <TabsTrigger value="export" className={RAIL_TAB}>
+                <FileDown className="size-4 shrink-0" strokeWidth={1.5} /> Export
+              </TabsTrigger>
+            </TabsList>
+          </ScrollArea>
 
-          {busy && (
-            <div className="min-w-0 space-y-1.5">
-              <Progress value={pct} />
-              <p className="block w-full min-w-0 truncate text-xs text-muted-foreground">
-                {prog ? `${prog.phase} ${prog.done.toLocaleString()} of ${prog.total.toLocaleString()} · ${prog.current}` : "Getting ready…"}
-              </p>
-            </div>
-          )}
-          {last && !busy && <p className="rounded-lg border p-3 text-sm">{last}</p>}
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <ScrollArea className="min-h-0 min-w-0 flex-1" viewportClassName="max-h-[min(70dvh,32rem)]">
+              <div className="p-5">
+                <TabsContent value="backup">
+                  <PanelHeader icon={<HardDrive className={icon} strokeWidth={1.5} />} title="Backup folder"
+                    hint="Where copies of your chats are kept."
+                    action={
+                      <Button size="sm" disabled={!!busy} className="shrink-0" onClick={() => run("sync")}>
+                        {busy === "sync" ? <Loader2 className="size-4 animate-spin" /> : <UploadCloud className="size-4" />} Sync now
+                      </Button>
+                    }
+                  />
+                  {where && !where.available && (
+                    <div role="alert" className="mb-3 flex items-start gap-2 rounded-lg border border-destructive/40 p-3 text-xs">
+                      <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-destructive" strokeWidth={1.5} />
+                      <p>The backup folder cannot be reached right now. Is the drive connected? Backups wait until it is back, and nothing is saved anywhere else.</p>
+                    </div>
+                  )}
+                  <div className="overflow-hidden rounded-xl border">
+                    <div className="flex min-w-0 items-start gap-3 p-3.5">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium">Location</p>
+                          {where && (
+                            <Badge variant="secondary" className="h-4 px-1.5 text-[10px] font-normal">
+                              {where.isDefault ? "Default" : "Custom"}
+                            </Badge>
+                          )}
+                        </div>
+                        <p className="mt-0.5 break-all font-mono text-xs text-muted-foreground">{status?.path || "…"}</p>
+                        {where && !where.isDefault && (
+                          <button type="button" disabled={!!busy} onClick={() => void useDefaultFolder()} className="mt-1 cursor-pointer text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline disabled:cursor-not-allowed disabled:opacity-50">
+                            Use the default folder instead
+                          </button>
+                        )}
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1">
+                        <Button variant="ghost" size="icon" className="size-8 text-muted-foreground" aria-label="Open the backup folder" onClick={() => invoke("open_backup_folder").catch((e) => toast(String(e)))}>
+                          <FolderOpen className="size-4" strokeWidth={1.5} />
+                        </Button>
+                        <Button variant="outline" size="sm" disabled={!!busy} onClick={() => void chooseFolder()}>
+                          <FolderInput className="size-4" /> Change…
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-[minmax(0,0.7fr)_minmax(0,0.8fr)_minmax(0,1.5fr)] divide-x border-t bg-muted/20">
+                      <Stat label="Files" value={status ? status.files.toLocaleString() : "…"} />
+                      <Stat label="Size" value={status ? fmtSize(status.bytes) : "…"} />
+                      <Stat label="Last synced" value={status?.lastSyncMs ? fmtDate(status.lastSyncMs) : "Never"} />
+                    </div>
+                    {where?.previous && (
+                      <div className="min-w-0 space-y-2 border-t p-3.5 text-xs">
+                        <div>
+                          <p className="font-medium">Previous backup folder</p>
+                          <p className="mt-0.5 break-all font-mono text-muted-foreground">{where.previous}</p>
+                          <p className="mt-1 text-muted-foreground">It is not used any more. Remove it once you have checked that the new backup is complete.</p>
+                        </div>
+                        <div className="flex gap-2">
+                          <Button variant="outline" size="sm" onClick={() => void invoke("open_folder", { path: where.previous })}>
+                            <FolderOpen className="size-4" /> Open
+                          </Button>
+                          <Button variant="outline" size="sm" disabled={removing} onClick={() => void removePrevious()}>
+                            {removing ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />} Move to Recycle Bin
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  {last && !busy && tab === "backup" && <p className="mt-3 rounded-lg border p-3 text-sm">{last}</p>}
+                </TabsContent>
 
-          <div className="grid grid-cols-2 gap-2">
-            <Button disabled={!!busy} onClick={() => run("sync")}>
-              {busy === "sync" ? <Loader2 className="size-4 animate-spin" /> : <UploadCloud className="size-4" />} Sync now
-            </Button>
-            <Button variant="outline" disabled={!!busy} onClick={() => run("restore")}>
-              {busy === "restore" ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Restore missing
-            </Button>
-          </div>
+                <TabsContent value="restore">
+                  <PanelHeader icon={<RotateCcw className={icon} strokeWidth={1.5} />} title="Restore" hint="Bring back chats that are gone from their tool." />
+                  <div className="rounded-xl border p-3.5">
+                    <div className="flex items-center justify-between gap-6">
+                      <div className="min-w-0 max-w-[19rem]">
+                        <p className="text-sm font-medium">Restore missing chats</p>
+                        <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">Copies back only chats that are gone. A chat that still exists is never overwritten.</p>
+                      </div>
+                      <Button disabled={!!busy} className="shrink-0" onClick={() => run("restore")}>
+                        {busy === "restore" ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Restore missing
+                      </Button>
+                    </div>
+                  </div>
+                  {last && !busy && tab === "restore" && <p className="mt-3 rounded-lg border p-3 text-sm">{last}</p>}
+                </TabsContent>
 
+                <TabsContent value="auto">
+                  <PanelHeader icon={<RefreshCw className={icon} strokeWidth={1.5} />} title="Automatic backup" hint="Keep the backup up to date without asking." />
+                  <div className="flex items-center gap-3 rounded-xl border p-3.5">
+                    <label className="min-w-0 flex-1 cursor-pointer">
+                      <p className="text-sm font-medium">Keep backing up automatically</p>
+                      <p className="text-xs text-muted-foreground">Runs when ChatVault opens, and every 10 minutes while it is open.</p>
+                    </label>
+                    <Switch
+                      checked={auto}
+                      aria-label="Keep backing up automatically"
+                      onCheckedChange={(v) => {
+                        setAuto(v);
+                        localStorage.setItem(AUTO_SYNC_KEY, v ? "1" : "0");
+                      }}
+                    />
+                  </div>
+                </TabsContent>
 
-          <div className="rounded-lg border p-3">
-            <div className="flex items-center gap-3">
-              <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
-                <FileDown className="size-4 text-muted-foreground" strokeWidth={1.5} />
+                <TabsContent value="export">
+                  <PanelHeader icon={<FileDown className={icon} strokeWidth={1.5} />} title="Export" hint="Save your chats as plain files." />
+                  <div className="rounded-xl border p-3.5">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium">Export all chats as Markdown</p>
+                        <p className="text-xs text-muted-foreground">One .md file per chat. Exporting again replaces them.</p>
+                      </div>
+                      <Button variant="outline" className="shrink-0" disabled={exp.running} onClick={() => void startBulkExport()}>
+                        {exp.running ? <Loader2 className="size-4 animate-spin" /> : <FileDown className="size-4" />} {exp.running ? "Exporting" : "Export"}
+                      </Button>
+                    </div>
+                    {exp.running && (
+                      <div className="mt-3 space-y-1.5">
+                        <Progress value={exp.total ? Math.round((exp.done / exp.total) * 100) : null} />
+                        <p className="truncate text-xs text-muted-foreground">
+                          {exp.total ? `${exp.done.toLocaleString()} of ${exp.total.toLocaleString()}${exp.current ? ` · ${exp.current}` : ""}` : "Getting ready…"} · you can close this window
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </TabsContent>
+
+                <div role="note" className="mt-5 flex items-start gap-2 rounded-lg bg-muted/40 p-3 text-xs text-muted-foreground">
+                  <Info className="mt-0.5 size-3.5 shrink-0" strokeWidth={1.5} />
+                  <p>Backed-up chats stay visible after you sign out or reinstall.</p>
+                </div>
               </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium">Export all chats as Markdown</p>
-                <p className="text-xs text-muted-foreground">One .md file per chat. Exporting again replaces them.</p>
-              </div>
-              <Button variant="outline" size="sm" className="shrink-0" disabled={exp.running} onClick={() => void startBulkExport()}>
-                {exp.running ? <Loader2 className="size-4 animate-spin" /> : <FileDown className="size-4" />} {exp.running ? "Exporting" : "Export"}
-              </Button>
-            </div>
-            {exp.running && (
-              <div className="mt-3 space-y-1.5">
-                <Progress value={exp.total ? Math.round((exp.done / exp.total) * 100) : null} />
-                <p className="truncate text-xs text-muted-foreground">
-                  {exp.total ? `${exp.done.toLocaleString()} of ${exp.total.toLocaleString()}${exp.current ? ` · ${exp.current}` : ""}` : "Getting ready…"} · you can close this window
+            </ScrollArea>
+
+            {busy && (
+              <div className="min-w-0 space-y-1.5 border-t px-5 py-3">
+                <Progress value={pct} />
+                <p className="block w-full min-w-0 truncate text-xs text-muted-foreground">
+                  {prog ? `${prog.phase} ${prog.done.toLocaleString()} of ${prog.total.toLocaleString()} · ${prog.current}` : "Getting ready…"}
                 </p>
               </div>
             )}
           </div>
-
-          <div className="flex items-center gap-3 rounded-lg border p-3">
-            <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
-              <RefreshCw className="size-4 text-muted-foreground" strokeWidth={1.5} />
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium">Keep backing up automatically</p>
-              <p className="text-xs text-muted-foreground">Runs on open and every 10 minutes.</p>
-            </div>
-            <Switch
-              checked={auto}
-              onCheckedChange={(v) => {
-                setAuto(v);
-                localStorage.setItem(AUTO_SYNC_KEY, v ? "1" : "0");
-              }}
-            />
-          </div>
-
-          <div role="alert" className="flex items-start gap-2 rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
-            <Info className="mt-0.5 size-3.5 shrink-0" strokeWidth={1.5} />
-            <p>Backed-up chats stay visible after you sign out or reinstall. Restore missing only copies back chats that are gone, and never overwrites.</p>
-          </div>
-        </div>
+        </Tabs>
       </DialogContent>
     </Dialog>
-  );
-}
-
-function Row({ label, value, mono }: { label: string; value: ReactNode; mono?: boolean }) {
-  return (
-    <div className="flex items-start justify-between gap-3 py-0.5">
-      <span className="shrink-0 text-muted-foreground">{label}</span>
-      <span className={`min-w-0 break-all text-right ${mono ? "font-mono text-xs" : ""}`}>{value}</span>
-    </div>
   );
 }

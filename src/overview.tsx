@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Area, AreaChart, CartesianGrid, XAxis } from "recharts";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { FadedScroll } from "@/faded-scroll";
-import { ArrowUpRight, DatabaseBackup, HardDrive, FolderOpen, Bug, Copy, History, MessagesSquare, MoreHorizontal, Play, Tag, Moon, RefreshCw, Search, Sun } from "lucide-react";
+import { Activity, ArrowUpRight, DatabaseBackup, HardDrive, FolderOpen, Bug, Copy, History, MessagesSquare, MoreHorizontal, Play, Tag, Moon, RefreshCw, Search, Sun } from "lucide-react";
 import { ContextArea, type Entry } from "@/context-area";
 import { notify } from "@/toast";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -302,7 +302,7 @@ export function OverviewPage({
               ...(backup?.path ? ([{ type: "item", label: "Backup folder path", icon: <Copy strokeWidth={1.5} />, onSelect: copy(backup.path, "Path") }] as Entry[]) : []),
             ],
           },
-          ...(onTheme ? ([{ type: "sep" }, { type: "item", label: dark ? "Switch to the light theme" : "Switch to the dark theme", icon: dark ? <Sun strokeWidth={1.5} /> : <Moon strokeWidth={1.5} />, onSelect: onTheme }] as Entry[]) : []),
+          ...(onTheme ? ([{ type: "sep" }, { type: "item", label: dark ? "Light theme" : "Dark theme", icon: dark ? <Sun strokeWidth={1.5} /> : <Moon strokeWidth={1.5} />, onSelect: onTheme }] as Entry[]) : []),
         ];
       }}
     >
@@ -358,6 +358,7 @@ export function OverviewPage({
               <Card
                 ctx="chart"
                 className="overflow-hidden"
+                icon={<Activity className="size-4 text-muted-foreground" strokeWidth={1.5} />}
                 title="Activity"
                 hint="Chats you used each day"
                 action={
@@ -377,6 +378,21 @@ export function OverviewPage({
                     <ChartContainer config={chartConfig} className="h-40 w-full @min-[1080px]:h-52 [&_.recharts-cartesian-grid-horizontal_line:first-child]:stroke-transparent">
                       <AreaChart data={chartData} margin={{ left: 0, right: 0, top: 8, bottom: 0 }}>
                         <defs>
+                          {/* The outline of a layer follows the filled shape exactly, and fades out wherever the layer has no chats, so empty layers never pile their lines on the edge of the one below. */}
+                          {drawn.map((p) => (
+                            <linearGradient key={`edge-${p}`} id={`edge-${p}`} x1="0" y1="0" x2="1" y2="0">
+                              {chartData.map((row, i) => (
+                                // One stop per day: solid where the layer has chats, clear where it has none, and a smooth
+                                // fade in between, so a layer's line thins out as the layer does and the line below takes over.
+                                <stop
+                                  key={i}
+                                  offset={`${chartData.length > 1 ? ((i / (chartData.length - 1)) * 100).toFixed(3) : 0}%`}
+                                  stopColor={`var(--color-${p})`}
+                                  stopOpacity={Number(row[p as keyof typeof row] ?? 0) > 0 ? 1 : 0}
+                                />
+                              ))}
+                            </linearGradient>
+                          ))}
                           {drawn.map((p) => (
                             <linearGradient key={p} id={`fill-${p}`} x1="0" y1="0" x2="0" y2="1">
                               <stop offset="5%" stopColor={`var(--color-${p})`} stopOpacity={0.6} />
@@ -389,7 +405,7 @@ export function OverviewPage({
                         <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="dot" />} />
                         {shownTools.map((p) =>
                           drawn.includes(p) ? (
-                            <Area key={p} dataKey={p} type="monotone" stackId="a" stroke={`var(--color-${p})`} strokeWidth={1.5} fill={`url(#fill-${p})`} />
+                            <Area key={p} dataKey={p} type="monotone" stackId="a" stroke={`url(#edge-${p})`} strokeWidth={1.5} fill={`url(#fill-${p})`} />
                           ) : (
                             // No chats in these days: nothing to draw, but the tooltip still lists the tool with 0.
                             <Area key={p} dataKey={p} type="monotone" stackId="a" stroke={`var(--color-${p})`} strokeOpacity={0} fill={`var(--color-${p})`} fillOpacity={0} activeDot={false} isAnimationActive={false} />

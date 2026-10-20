@@ -21,6 +21,7 @@ export function ChatCard({
   entries,
   onError,
   onOpen,
+  onUnpin,
 }: {
   chat: Chat;
   title?: string;
@@ -34,13 +35,14 @@ export function ChatCard({
   entries?: () => Entry[];
   onError?: (e: unknown) => void;
   onOpen: () => void;
+  onUnpin?: () => void;
 }) {
   const card = (
     <div
       role="button"
       tabIndex={0}
       onClick={onOpen}
-      onKeyDown={(e) => e.key === "Enter" && onOpen()}
+      onKeyDown={(e) => e.target === e.currentTarget && e.key === "Enter" && onOpen()}
       className={cn("group w-full cursor-pointer rounded-lg border border-transparent px-2.5 py-2 text-left transition hover:bg-muted dark:hover:bg-white/[0.06]", selected && "bg-muted dark:bg-white/[0.06]")}
     >
       <div className="flex items-start gap-2.5">
@@ -56,7 +58,17 @@ export function ChatCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{prettyTitle(title ?? chat.title)}</span>
-            {pinned && <Pin className="size-3 shrink-0 text-muted-foreground" />}
+            {pinned && (onUnpin ? (
+              <button
+                type="button"
+                aria-label="Unpin chat"
+                title="Unpin chat"
+                className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+                onClick={(e) => { e.stopPropagation(); onUnpin(); }}
+              >
+                <Pin className="size-3" />
+              </button>
+            ) : <Pin className="size-3 shrink-0 text-muted-foreground" />)}
             {(chat.archived || chat.backup) && <Archive className="size-3.5 shrink-0 text-muted-foreground" strokeWidth={1.5} />}
             {menu}
           </div>

@@ -12,6 +12,7 @@ import {
   DatabaseBackup,
   Eye,
   FolderOpen,
+  Settings as SettingsIcon,
   Trash2,
   ArrowUpDown,
   ChevronsDownUp,
@@ -50,7 +51,7 @@ import { AppLogo, ProviderLogo, ProviderStack } from "@/claude-logo";
 import { Badge } from "@/components/ui/badge";
 import { ActionIcon } from "@/action-icon";
 import { ChatCard } from "@/chat-card";
-import { CORE_PROVIDERS, PROVIDERS, type Tool, PROVIDER_NAME, isHandoffOnly, accountLabel, chatActions, continueTargets, COPY_CONTENT_IDS, prettyProject, setAccountNames, type AccountInfo, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
+import { CORE_PROVIDERS, PROVIDERS, setOffTools, setCustomAccountNames, originalAccountLabel, type Tool, PROVIDER_NAME, isHandoffOnly, deleteKind, deleteBlockedMessage, accountLabel, chatActions, continueTargets, COPY_CONTENT_IDS, prettyProject, setAccountNames, type AccountInfo, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
 import { FadedScroll } from "@/faded-scroll";
 import {
   DropdownMenu,
@@ -68,8 +69,10 @@ import { SidebarSkeleton, MessagesSkeleton } from "@/skeletons";
 import { Splash } from "@/splash";
 import { TitleBar } from "@/titlebar";
 import { AUTO_SYNC_KEY } from "@/store";
-import { chatKey, useChatMeta, usePersisted } from "@/store";
+import { chatKey, useAccountNames, useChatMeta, usePersisted } from "@/store";
+import { RenameAccountDialog } from "@/rename-account-dialog";
 import { startAutoUpdate } from "@/updater";
+import { groupChatsByDay } from "@/chat-groups";
 
 // Keep the shell independent of chat rendering, charts and closed dialogs.
 const ChatView = lazy(() => import("@/chat-view").then((m) => ({ default: m.ChatView })));
@@ -78,6 +81,8 @@ const CommandPalette = lazy(() => import("@/command-palette").then((m) => ({ def
 const GlobalSearch = lazy(() => import("@/global-search").then((m) => ({ default: m.GlobalSearch })));
 const TagsDialog = lazy(() => import("@/tags-dialog").then((m) => ({ default: m.TagsDialog })));
 const SyncDialog = lazy(() => import("@/sync-dialog").then((m) => ({ default: m.SyncDialog })));
+const SettingsDialog = lazy(() => import("@/settings-dialog").then((m) => ({ default: m.SettingsDialog })));
+const MoveBackupDialog = lazy(() => import("@/move-backup-dialog").then((m) => ({ default: m.MoveBackupDialog })));
 
 const PAGE_SIZE = 20;
 const MSG_PAGE = 80;
@@ -98,9 +103,20 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = usePersisted("chatvault.sidebar", true);
   const [headerOpen, setHeaderOpen] = usePersisted("chatvault.headerOpen", true);
   const [pinnedOpen, setPinnedOpen] = usePersisted("chatvault.sec.pinned", true);
+  const [todayOpen, setTodayOpen] = usePersisted("chatvault.sec.today", true);
+  const [yesterdayOpen, setYesterdayOpen] = usePersisted("chatvault.sec.yesterday", true);
+  const [calendarDay, setCalendarDay] = useState(() => new Date().toDateString());
+  useEffect(() => {
+    const timer = window.setInterval(() => setCalendarDay(new Date().toDateString()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const [recentOpen, setRecentOpen] = usePersisted("chatvault.sec.recent", true);
   const [dark, setDark] = useState(() => localStorage.getItem("theme") !== "light");
   const { pins, names, togglePin, rename } = useChatMeta();
+  const { accountNames, renameAccount } = useAccountNames();
+  setCustomAccountNames(accountNames);
+  const [renamingAccount, setRenamingAccount] = useState<string | null>(null);
+  const [accountOpen, setAccountOpen] = useState(false);
 
   const [overview, setOverview] = useState<Record<Provider, Overview | null>>({ claude: null, codex: null, cursor: null, gemini: null, opencode: null, cline: null });
   const [accountInfo, setAccountInfo] = useState<AccountInfo[]>([]);
@@ -145,6 +161,19 @@ export default function App() {
   }, []);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [syncOpen, setSyncOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Tools switched off in Settings are left out of every list. This only makes the screen redraw when that changes.
+  const [, setOffTick] = useState(0);
+  const applyOff = useCallback(async () => {
+    const list = await invoke<string[]>("disabled_integrations").catch(() => [] as string[]);
+    setOffTools(list);
+    setOffTick((n) => n + 1);
+    return list;
+  }, []);
+  useEffect(() => {
+    void applyOff();
+  }, [applyOff]);
+  const [movePending, setMovePending] = useState<{ path: string; filesToMove: number; bytesToMove: number; isExistingBackup: boolean } | null>(null);
   const [renaming, setRenaming] = useState<Chat | null>(null);
   const [deleting, setDeleting] = useState<Chat | null>(null);
   const [organize, setOrganize] = usePersisted("chatvault.organize", "list");
@@ -229,12 +258,16 @@ export default function App() {
     const stopUpdates = startAutoUpdate();
     const offSync = listen("tray-sync", () => setSyncOpen(true));
     const offScan = listen("tray-rescan", () => void rescan());
+    const offSearch = listen("tray-search", () => setPaletteOpen(true));
+    const offSettings = listen("tray-settings", () => setSettingsOpen(true));
     return () => {
       cancelled = true;
       window.clearTimeout(startup);
       void un.then((f) => f());
       void offSync.then((f) => f());
       void offScan.then((f) => f());
+      void offSearch.then((f) => f());
+      void offSettings.then((f) => f());
       window.clearInterval(every);
       stopUpdates();
     };
@@ -378,7 +411,7 @@ export default function App() {
       io.disconnect();
       window.clearTimeout(timer);
     };
-  }, [hasMore, loadMore, items.length, recentOpen]);
+  }, [hasMore, loadMore, items.length, recentOpen, todayOpen, yesterdayOpen]);
 
   const openId = useRef(0);
   const [outline, setOutline] = useState<{ ts: string; text: string }[] | null>(null);
@@ -547,6 +580,26 @@ export default function App() {
         }
         if (st === stamp.current) return;
         stamp.current = st;
+        // Native history updates tool items in place as well as appending items.
+        if (sel.path.startsWith("codex-db:")) {
+          const r = await invoke<MsgPage>("read_chat_page", { provider: sel.provider, path: sel.path, before: null, limit: 2000 });
+          if (selRef.current?.path !== sel.path || selRef.current?.provider !== sel.provider) return;
+          if (r.total < cur.total || r.start > cur.total) { setPage(r); return; }
+          const updates = new Map(r.messages.filter(m => m.id).map(m => [m.id!, m]));
+          setPage(p => {
+            if (!p || p.total !== cur.total) return p;
+            let changed = false;
+            const messages = p.messages.map(m => {
+              const next = m.id ? updates.get(m.id) : undefined;
+              if (!next || JSON.stringify(next) === JSON.stringify(m)) return m;
+              changed = true;
+              return next;
+            });
+            const added = r.messages.slice(Math.max(0, cur.total - r.start));
+            return changed || added.length ? { ...p, messages: [...messages, ...added], total: r.total } : p;
+          });
+          return;
+        }
         // Fast path: only the end of the file is read, and what is new is whatever follows the last message already shown.
         const sig = (m: Msg) => `${m.ts}|${m.role}|${m.kind}|${m.text.slice(0, 80)}`;
         const lastShown = cur.messages[cur.messages.length - 1];
@@ -672,12 +725,13 @@ export default function App() {
       ...Object.fromEntries(accountList.map((a) => [a.id, `${accountLabel(a.id)} · ${a.count.toLocaleString()}${provider === "claude" ? tag(a.id) : ""}`])),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [accountList, overview, provider, accountInfo],
+    [accountList, overview, provider, accountInfo, accountNames],
   );
 
   const lq = q.toLowerCase();
   const pinnedShown = pinned.filter((c) => !lq || named(c).title.toLowerCase().includes(lq) || c.project.toLowerCase().includes(lq));
   const recent = useMemo(() => items.filter((c) => !pinSet.has(chatKey(c))), [items, pinSet]);
+  const dayGroups = useMemo(() => groupChatsByDay(recent), [recent, calendarDay]);
   const projectGroups = useMemo(() => groupByProject(recent), [recent]);
   const projectNames = useMemo(() => projectGroups.map(([name]) => name), [projectGroups]);
   const allProjectsClosed = projectNames.length > 0 && projectNames.every((n) => !projectOpen(n));
@@ -696,11 +750,12 @@ export default function App() {
     {
       id: "delete",
       label: "Delete chat",
-      hint: "Moves the chat file to the Recycle Bin.",
+      hint: ({ trash: "Moves the chat to the Recycle Bin.", opencode: "Deletes the session from OpenCode. It cannot be restored.", blocked: "Not available: this chat is stored inside another app." } as const)[deleteKind(c)],
       icon: Trash2,
       group: "Chat",
       danger: true,
-      run: async () => setDeleting(c),
+      muted: deleteKind(c) === "blocked",
+      run: async () => requestDelete(c),
     },
     {
       id: "archive",
@@ -712,7 +767,7 @@ export default function App() {
     },
     { id: "tags", label: "Tags", hint: "Add your own labels to this chat. Only shown in ChatVault.", icon: Tag, group: "Chat", run: async () => setTagging(c) },
     { id: "rename", label: "Rename", hint: "Give this chat your own name. The original is not changed.", icon: Pencil, group: "Chat", run: async () => setRenaming(c) },
-  ] as ChatAction[]).filter((a) => !(a.id === "delete" && isHandoffOnly(c.provider))));
+  ] as ChatAction[]));
 
   const loadTags = useCallback(() => {
     if (!isTauri) return;
@@ -725,6 +780,12 @@ export default function App() {
       .catch(() => {});
   }, [provider]);
   useEffect(loadTags, [loadTags, reloadKey]);
+
+  /** Opens the confirm box, or says why this chat cannot be deleted from here. */
+  const requestDelete = (c: Chat) => {
+    if (deleteKind(c) === "blocked") say(deleteBlockedMessage(PROVIDER_NAME[c.provider]));
+    else setDeleting(c);
+  };
 
   const archive = async (c: Chat) => {
     const to = !c.userArchived;
@@ -764,6 +825,7 @@ export default function App() {
     { type: "sep" },
     { type: "item", label: "Search all chats", icon: <Search strokeWidth={1.5} />, onSelect: () => openSearch() },
     { type: "item", label: "Sync & backup", icon: <DatabaseBackup strokeWidth={1.5} />, onSelect: () => setSyncOpen(true) },
+    { type: "item", label: "Settings", icon: <SettingsIcon strokeWidth={1.5} />, onSelect: () => setSettingsOpen(true) },
     { type: "item", label: "Hide the sidebar", icon: <PanelLeft strokeWidth={1.5} />, onSelect: () => setSidebarOpen(false) },
   ];
 
@@ -790,20 +852,56 @@ export default function App() {
   );
 
 
+  // Search is on every page; Sync & backup and Settings belong to the main page only.
+  const searchButton = (
+    <Tip label="Search chats and actions (Ctrl+K)">
+      <Button variant="outline" size="sm" className="text-muted-foreground" onClick={() => setPaletteOpen(true)}>
+        <Search className="size-4" /> Search
+        <kbd className="ml-1 rounded border bg-muted px-1 text-[10px]">Ctrl K</kbd>
+      </Button>
+    </Tip>
+  );
   const controls = (
     <>
-            <Tip label="Search chats and actions (Ctrl+K)">
-              <Button variant="outline" size="sm" className="text-muted-foreground" onClick={() => setPaletteOpen(true)}>
-                <Search className="size-4" /> Search
-                <kbd className="ml-1 rounded border bg-muted px-1 text-[10px]">Ctrl K</kbd>
-              </Button>
-            </Tip>
+            {searchButton}
             <Tip label="Back up or restore your chats.">
-              <Button variant="outline" size="sm" onClick={() => setSyncOpen(true)}>
+              <Button size="sm" onClick={() => setSyncOpen(true)}>
                 <DatabaseBackup className="size-4" /> Sync &amp; backup
               </Button>
             </Tip>
+            <Tip label="Settings: where each tool's chats are read from.">
+              <Button size="icon" className="size-8" aria-label="Settings" onClick={() => setSettingsOpen(true)}>
+                <SettingsIcon className="size-4" />
+              </Button>
+            </Tip>
     </>
+  );
+
+  const renderChatList = (list: Chat[]) => (
+    organize === "project"
+                  ? groupByProject(list).map(([project, list]) => {
+                      const isOpen = projectOpen(project);
+                      return (
+                        <Collapsible
+                          key={project}
+                          open={isOpen}
+                          onOpenChange={(o) => setProjectExceptions((c) => (o === (projectsMode === "open") ? c.filter((x) => x !== project) : c.includes(project) ? c : [...c, project]))}
+                          className="pt-1"
+                          onPointerEnter={() => setWarmProjects((w) => (w.has(project) ? w : new Set(w).add(project)))}
+                        >
+                          <CollapsibleTrigger className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground">
+                            <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", isOpen && "rotate-90")} />
+                            <FolderOpen className="size-3.5 shrink-0" strokeWidth={1.5} />
+                            <span className="min-w-0 flex-1 truncate text-left">{prettyProject(project)}</span>
+                            <Badge variant="secondary" className="h-4 px-1.5 text-[11px] tabular-nums text-muted-foreground">{list.length}</Badge>
+                          </CollapsibleTrigger>
+                          <CollapsibleContent className="space-y-0.5" keepMounted={warmProjects.has(project)}>
+                            {(isOpen || warmProjects.has(project)) && list.map((c) => row(c, true))}
+                          </CollapsibleContent>
+                        </Collapsible>
+                      );
+                    })
+                  : list.map((c) => row(c))
   );
 
   return (
@@ -855,15 +953,42 @@ export default function App() {
                 </SelectContent>
               </Select>
               {provider !== "all" && (
-              <Select value={account} onValueChange={(v) => v && setAccounts((a) => ({ ...a, [provider]: v }))} items={accountItems}>
+              <Select open={accountOpen} onOpenChange={setAccountOpen} value={account} onValueChange={(v) => v && setAccounts((a) => ({ ...a, [provider]: v }))} items={accountItems}>
                 <SelectTrigger className="h-9 w-full">
                   <Users className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} />
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent alignItemWithTrigger={false} align="end" sideOffset={6} className="w-72">
                   {Object.entries(accountItems).map(([id, label]) => (
-                    <SelectItem key={id} value={id}>
-                      {label}
+                    <SelectItem
+                      key={id}
+                      value={id}
+                      trailing={
+                        id !== "all" && id !== "unknown" ? (
+                          <button
+                            type="button"
+                            aria-label={`Rename ${accountLabel(id)}`}
+                            title="Rename account"
+                            className="ml-1 flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                            onPointerDown={(e) => e.stopPropagation()}
+                            onPointerUp={(e) => e.stopPropagation()}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              setAccountOpen(false);
+                              setRenamingAccount(id);
+                            }}
+                          >
+                            <Pencil className="size-3.5" strokeWidth={1.5} />
+                          </button>
+                        ) : undefined
+                      }
+                    >
+                      {/* A long name is cut with "…" and shown in full on hover, so the tick and the pencil always stay in view. */}
+                      <span className="block max-w-[13.5rem] truncate" title={label}>
+                        {label}
+                      </span>
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -881,9 +1006,20 @@ export default function App() {
                   {pinnedShown.map((c) => row(c))}
                 </Section>
               )}
+              {/* A day with no chats is left out, so the list never shows an empty heading. */}
+              {dayGroups.today.length > 0 && (
+                <Section title="Today" count={dayGroups.today.length} open={todayOpen} onOpenChange={setTodayOpen}>
+                  {renderChatList(dayGroups.today)}
+                </Section>
+              )}
+              {dayGroups.yesterday.length > 0 && (
+                <Section title="Yesterday" count={dayGroups.yesterday.length} open={yesterdayOpen} onOpenChange={setYesterdayOpen}>
+                  {renderChatList(dayGroups.yesterday)}
+                </Section>
+              )}
               <Section
-                title="Recents"
-                count={hits ? items.length : total}
+                title="Recent"
+                count={dayGroups.recent.length}
                 open={recentOpen}
                 onOpenChange={setRecentOpen}
                 action={
@@ -929,36 +1065,13 @@ export default function App() {
                     <p className="text-xs text-muted-foreground">Try a different word or account.</p>
                   </div>
                 )}
-                {organize === "project"
-                  ? projectGroups.map(([project, list]) => {
-                      const isOpen = projectOpen(project);
-                      return (
-                        <Collapsible
-                          key={project}
-                          open={isOpen}
-                          onOpenChange={(o) => setProjectExceptions((c) => (o === (projectsMode === "open") ? c.filter((x) => x !== project) : c.includes(project) ? c : [...c, project]))}
-                          className="pt-1"
-                          onPointerEnter={() => setWarmProjects((w) => (w.has(project) ? w : new Set(w).add(project)))}
-                        >
-                          <CollapsibleTrigger className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground">
-                            <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", isOpen && "rotate-90")} />
-                            <FolderOpen className="size-3.5 shrink-0" strokeWidth={1.5} />
-                            <span className="min-w-0 flex-1 truncate text-left">{prettyProject(project)}</span>
-                            <Badge variant="secondary" className="h-4 px-1.5 text-[11px] tabular-nums text-muted-foreground">{list.length}</Badge>
-                          </CollapsibleTrigger>
-                          <CollapsibleContent className="space-y-0.5" keepMounted={warmProjects.has(project)}>
-                            {(isOpen || warmProjects.has(project)) && list.map((c) => row(c, true))}
-                          </CollapsibleContent>
-                        </Collapsible>
-                      );
-                    })
-                  : recent.map((c) => row(c))}
-                {hasMore && (
-                  <div ref={sentinelRef}>
-                    <SidebarSkeleton rows={3} />
-                  </div>
-                )}
+                {renderChatList(dayGroups.recent)}
               </Section>
+              {hasMore && (todayOpen || yesterdayOpen || recentOpen) && (
+                <div ref={sentinelRef}>
+                  <SidebarSkeleton rows={3} />
+                </div>
+              )}
             </div>
           </FadedScroll>
           </ContextArea>
@@ -967,7 +1080,7 @@ export default function App() {
 
         {/* Content */}
         <div className="flex min-w-0 flex-1 flex-col">
-        <TitleBar title={selected ? `${PROVIDER_NAME[selected.provider]} / ${prettyProject(selected.project)}` : undefined} actions={selected ? controls : undefined} sidebarOpen={sidebarOpen} busy={!!indexing} dark={dark} onRefresh={rescan} onTheme={() => setDark((d) => !d)} />
+        <TitleBar title={selected ? `${PROVIDER_NAME[selected.provider]} / ${prettyProject(selected.project)}` : undefined} actions={selected ? searchButton : undefined} sidebarOpen={sidebarOpen} busy={!!indexing} dark={dark} onRefresh={rescan} onTheme={() => setDark((d) => !d)} />
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
           <Suspense fallback={<MessagesSkeleton />}>
           {searchAll ? (
@@ -1023,7 +1136,7 @@ export default function App() {
               onTogglePin={() => togglePin(chatKey(selected))}
               onArchive={() => void archive(selected)}
               onRename={() => setRenaming(selected)}
-              onDelete={() => setDeleting(selected)}
+              onDelete={() => requestDelete(selected)}
               onSearchAll={(q) => openSearch(q)}
               onRefresh={() => { void rescan(); open(selected); }}
               onOverview={() => setSelected(null)}
@@ -1050,8 +1163,9 @@ export default function App() {
             { id: "claude", label: "Show Claude chats", icon: <ProviderLogo provider="claude" className="size-4" />, run: () => switchProvider("claude") },
             { id: "codex", label: "Show Codex chats", icon: <ProviderLogo provider="codex" className="size-4" />, run: () => switchProvider("codex") },
             { id: "sync", label: "Sync & backup", icon: <DatabaseBackup className="size-4" />, run: () => setSyncOpen(true) },
+            { id: "settings", label: "Settings", icon: <SettingsIcon className="size-4" />, run: () => setSettingsOpen(true) },
             { id: "refresh", label: "Scan this PC for new chats", icon: <RefreshCw className="size-4" />, run: () => void rescan() },
-            { id: "theme", label: dark ? "Switch to the light theme" : "Switch to the dark theme", icon: dark ? <Sun className="size-4" /> : <Moon className="size-4" />, run: () => setDark((d) => !d) },
+            { id: "theme", label: dark ? "Light theme" : "Dark theme", icon: dark ? <Sun className="size-4" /> : <Moon className="size-4" />, run: () => setDark((d) => !d) },
           ]}
         />}
         </Suspense>
@@ -1063,16 +1177,49 @@ export default function App() {
           </Tip>
         </div>
         <Suspense fallback={null}>
-          {syncOpen && <SyncDialog open={syncOpen} onOpenChange={setSyncOpen} onChanged={rescan} toast={say} />}
+          {syncOpen && <SyncDialog open={syncOpen} onOpenChange={setSyncOpen} onChanged={rescan} onMove={setMovePending} toast={say} />}
+          {movePending && (
+            <MoveBackupDialog
+              check={movePending}
+              toast={say}
+              onClose={() => {
+                setMovePending(null);
+                setSyncOpen(true);
+              }}
+              onDone={() => {
+                setMovePending(null);
+                setSyncOpen(true);
+                void rescan();
+              }}
+            />
+          )}
+          <RenameAccountDialog
+            account={renamingAccount ? { id: renamingAccount, original: originalAccountLabel(renamingAccount), custom: accountNames[renamingAccount] ?? "" } : null}
+            onSave={renameAccount}
+            onClose={() => setRenamingAccount(null)}
+          />
+          {settingsOpen && (
+            <SettingsDialog
+              open={settingsOpen}
+              onOpenChange={setSettingsOpen}
+              onOpenBackup={() => setSyncOpen(true)}
+              onToolsChanged={async () => {
+                const off = await applyOff();
+                if (provider !== "all" && off.includes(provider)) setProvider("all");
+                void rescan();
+              }}
+            />
+          )}
         </Suspense>
         <DeleteDialog
           chat={deleting}
           onClose={() => setDeleting(null)}
           onConfirm={async (c) => {
+            const kind = deleteKind(c);
             await invoke("delete_chat", { path: c.path });
             if (selected && selected.id === c.id && selected.provider === c.provider) setSelected(null);
             setDeleting(null);
-            say("Moved to the Recycle Bin");
+            say(kind === "opencode" ? "Deleted from OpenCode" : "Moved to the Recycle Bin");
             setReloadKey((n) => n + 1);
           }}
         />
@@ -1237,6 +1384,10 @@ const ChatRow = memo(function ChatRow({
       chat={chat}
       selected={selected}
       pinned={pinned}
+      onUnpin={() => {
+        const action = getExtras(chat).find((a) => a.id === "pin");
+        if (action) void runAction(action.label, action.run);
+      }}
       live={live}
       hit={hit}
       inProject={inProject}
@@ -1271,8 +1422,11 @@ function DeleteDialog({ chat, onClose, onConfirm }: { chat: Chat | null; onClose
             <div className="min-w-0 space-y-1">
               <AlertDialogTitle className="text-base font-medium">Delete this chat?</AlertDialogTitle>
               <AlertDialogDescription>
-                “{chat?.title}” moves to the Recycle Bin and disappears from {tool}. You can restore it from the Recycle Bin.
-                {chat?.backup ? " This is a backup copy, so nothing else is removed." : " A copy in your backup folder is kept."}
+                {!chat
+                  ? null
+                  : deleteKind(chat) === "opencode"
+                    ? `“${chat.title}” is deleted from ${tool} for good. It cannot be restored from the Recycle Bin. A copy in your backup folder, if you made one, is kept.`
+                    : `“${chat.title}” moves to the Recycle Bin and disappears from ${tool}. You can restore it from the Recycle Bin.${chat.backup ? " This is a backup copy, so nothing else is removed." : " A copy in your backup folder is kept."}`}
               </AlertDialogDescription>
             </div>
           </div>
@@ -1353,7 +1507,7 @@ function chatEntries(chat: Chat, toast: (m: string) => void, msgs: Msg[] | null,
   const byId = (id: string) => all.find((a) => a.id === id);
   const item = (a: ChatAction | undefined, label?: string): Entry[] => {
     if (!a) return [];
-    return [{ type: "item", label: label ?? a.label, icon: <ActionIcon action={a} className="size-4" />, onSelect: () => runAction(a.label, a.run), danger: a.danger }];
+    return [{ type: "item", label: label ?? a.label, icon: <ActionIcon action={a} className="size-4" />, onSelect: () => runAction(a.label, a.run), danger: a.danger && !a.muted, muted: a.muted }];
   };
   const handoff = continueTargets(all);
   const commands = all.filter(isToolCommand);
@@ -1430,12 +1584,12 @@ function ChatMenu({ chat, toast, msgs, getExtras }: { chat: Chat; toast: (m: str
     return (
       <button
         key={a.id}
-        className={cn("flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted disabled:opacity-60", a.danger && "text-destructive hover:bg-destructive/10")}
+        className={cn("flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted disabled:opacity-60", a.danger && !a.muted && "text-destructive hover:bg-destructive/10", a.muted && "opacity-50")}
         onClick={() => {
           setOpen(false);
           void runAction(a.label, a.run);
         }}      >
-        <ActionIcon action={a} className={cn("size-4", !a.logo && (a.danger ? "text-destructive" : "text-muted-foreground"))} />
+        <ActionIcon action={a} className={cn("size-4", !a.logo && (a.danger && !a.muted ? "text-destructive" : "text-muted-foreground"))} />
         {short ? shortName(a) : SHORT_COPY[a.id] ?? a.label}
       </button>
     );
