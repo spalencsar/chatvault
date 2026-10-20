@@ -41,7 +41,7 @@ jobs:
           releaseBody: |
             ## ChatVault ${{ github.ref_name }}
 
-            Read, search, back up and continue your Claude Code, Codex and Cursor chats.
+            Read, search, back up and continue your Claude Code, Codex, Cursor, Gemini CLI, OpenCode and Cline chats.
 
             **Download**
             - `ChatVault_*_x64-setup.exe`: the installer (recommended)
