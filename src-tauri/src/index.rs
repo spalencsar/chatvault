@@ -436,7 +436,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
     }
     let result = (|| {
         let mut c = open_db()?;
-        let source_upgrade = c.query_row("SELECT value FROM source_state WHERE name='local_sources'",[],|r|r.get::<_,String>(0)).ok().as_deref()!=Some("4");
+        let source_upgrade = c.query_row("SELECT value FROM source_state WHERE name='local_sources'",[],|r|r.get::<_,String>(0)).ok().as_deref()!=Some("6");
         // Rows saved with a raw encoded folder name are rebuilt once so they get the readable project name.
         let _ = c.execute("DELETE FROM chats WHERE provider='claude' AND project LIKE 'C--%'", []);
         // Chats without desktop-app records are rebuilt once so they pick up the folder found in the transcript.
@@ -562,12 +562,12 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
         // Gemini CLI, OpenCode and Cline are rebuilt whenever one of their files changed.
         {
             let ofp = crate::others::fingerprint();
-            let olast: i64 = c.query_row("SELECT COALESCE(MAX(mtime),0) FROM chats WHERE provider IN ('gemini','opencode','cline')", [], |r| r.get(0)).unwrap_or(0);
+            let olast: i64 = c.query_row(&format!("SELECT COALESCE(MAX(mtime),0) FROM chats WHERE provider IN ({})", crate::others::SQL_IN), [], |r| r.get(0)).unwrap_or(0);
             if source_upgrade || (ofp > 0 && ofp != olast) {
                 let chats: Vec<_> = crate::others::scan().into_iter().filter(|c| crate::integrations::is_enabled(c.provider)).collect();
                 let tx = c.transaction().map_err(|e| e.to_string())?;
-                let _ = tx.execute("DELETE FROM chats_fts WHERE key IN (SELECT provider||':'||id FROM chats WHERE provider IN ('gemini','opencode','cline'))", []);
-                let _ = tx.execute("DELETE FROM chats WHERE provider IN ('gemini','opencode','cline')", []);
+                let _ = tx.execute(&format!("DELETE FROM chats_fts WHERE key IN (SELECT provider||':'||id FROM chats WHERE provider IN ({}))", crate::others::SQL_IN), []);
+                let _ = tx.execute(&format!("DELETE FROM chats WHERE provider IN ({})", crate::others::SQL_IN), []);
                 for ch in chats {
                     let row = Row {
                         s: ChatSummary {
@@ -575,8 +575,14 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
                             id: ch.id,
                             local_id: None,
                             title: ch.title.clone(),
-                            account: if ch.provider == "gemini" { crate::others::gemini_account().unwrap_or_else(|| "local".into()) } else { "local".into() },
-                            project: project_of(&ch.cwd, ch.provider),
+                            account: ch.account.clone().unwrap_or_else(|| {
+                                if ch.provider == "gemini" { crate::others::gemini_account().unwrap_or_else(|| "local".into()) } else { "local".into() }
+                            }),
+                            project: if ch.provider == "imported" {
+                                ch.account.clone().unwrap_or_else(|| "Imported".into())
+                            } else {
+                                project_of(&ch.cwd, ch.provider)
+                            },
                             cwd: ch.cwd,
                             created_ms: ch.created_ms,
                             last_ms: ch.last_ms,
@@ -633,7 +639,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
             tx.commit().map_err(|e| e.to_string())?;
         }
         if let Some(a) = app { let _ = a.emit("index-progress", Progress { phase: "Done".into(), done: total, total }); }
-        c.execute("INSERT OR REPLACE INTO source_state(name,value) VALUES('local_sources','4')",[]).map_err(|e|e.to_string())?;
+        c.execute("INSERT OR REPLACE INTO source_state(name,value) VALUES('local_sources','6')",[]).map_err(|e|e.to_string())?;
         Ok(())
     })();
     REFRESHING.store(false, Ordering::SeqCst);
@@ -836,7 +842,7 @@ pub fn index_bodies(app: Option<&AppHandle>) -> Result<(), String> {
                 msgs = crate::codex_db::read(path).unwrap_or_default();
             } else if provider == "cursor" {
                 msgs = crate::cursor::read(path).unwrap_or_default();
-            } else if matches!(provider.as_str(), "gemini" | "opencode" | "cline") {
+            } else if crate::others::TOOLS.contains(&provider.as_str()) {
                 msgs = crate::others::read(path).unwrap_or_default();
             } else if let Some(lines) = open_lines(Path::new(path)) {
                 for line in lines {

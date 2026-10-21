@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { DatabaseBackup, FolderOpen, Info, Loader2, Settings } from "lucide-react";
+import { DatabaseBackup, FilePlus2, FolderOpen, Info, Loader2, Settings } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -10,7 +10,8 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ProviderLogo } from "@/claude-logo";
 import { fmtSize, type Provider } from "@/chat-actions";
-import { notifyError } from "@/toast";
+import { notify, notifyError } from "@/toast";
+import { describeImport, importNousSave } from "@/import-noussave";
 import { PanelHeader, RAIL_TAB, RailLabel } from "@/rail";
 
 type Location = { label: string; path: string; isFile: boolean; exists: boolean; items: number | null; bytes: number | null };
@@ -55,6 +56,7 @@ export function SettingsDialog({
   const [sources, setSources] = useState<Source[] | null>(null);
   const [backup, setBackup] = useState<Where | null>(null);
   const [tab, setTab] = useState<string>("claude");
+  const [importing, setImporting] = useState(false);
 
   const load = useCallback(() => {
     setSources(null);
@@ -71,6 +73,21 @@ export function SettingsDialog({
   }, [open, load]);
 
   const openPlace = (path: string) => void invoke("open_chat_source", { path }).catch(notifyError);
+  const runImport = async (directory: boolean) => {
+    setImporting(true);
+    try {
+      const r = await importNousSave(directory);
+      if (!r) return;
+      if (r.added === 0 && r.failed.length) notifyError(describeImport(r));
+      else notify(describeImport(r));
+      load();
+      if (r.added) await onToolsChanged();
+    } catch (e) {
+      notifyError(e);
+    } finally {
+      setImporting(false);
+    }
+  };
   const [switching, setSwitching] = useState<string | null>(null);
   const toggle = async (s: Source, enabled: boolean) => {
     setSwitching(s.provider);
@@ -215,6 +232,21 @@ export function SettingsDialog({
                         <LocationCard key={`${l.label}:${l.path}`} loc={l} onOpen={() => openPlace(l.path)} />
                       ))}
                     </div>
+                    {s.provider === "imported" && s.enabled && (
+                      <div className="mt-4 space-y-2">
+                        <div className="flex flex-wrap gap-2">
+                          <Button variant="outline" size="sm" disabled={importing} onClick={() => void runImport(false)}>
+                            {importing ? <Loader2 className="size-3.5 animate-spin" /> : <FilePlus2 className="size-3.5" strokeWidth={1.5} />}
+                            Import files…
+                          </Button>
+                          <Button variant="outline" size="sm" disabled={importing} onClick={() => void runImport(true)}>
+                            {importing ? <Loader2 className="size-3.5 animate-spin" /> : <FolderOpen className="size-3.5" strokeWidth={1.5} />}
+                            Import folder…
+                          </Button>
+                        </div>
+                        <p className="text-xs text-muted-foreground">Drop files into the folder above, or pick them here. JSON is preferred. ChatGPT, Gemini and Grok are listed as separate platforms. Duplicates are skipped.</p>
+                      </div>
+                    )}
                   </TabsContent>
                 );
               })}

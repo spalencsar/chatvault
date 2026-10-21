@@ -15,7 +15,7 @@ use tauri::{AppHandle, Emitter};
 /// Written into a folder that ChatVault made or moved a backup into, so a later check knows it is one.
 const MARKER: &str = ".chatvault-backup";
 /// Folders a backup contains; a folder with any of them (or a marker) counts as an existing ChatVault backup.
-const KNOWN: [&str; 7] = ["claude", "codex", "cursor", "gemini", "opencode", "cline", MARKER];
+const KNOWN: [&str; 9] = ["claude", "codex", "cursor", "gemini", "opencode", "cline", "grok", "imported", MARKER];
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct Config {
@@ -96,7 +96,7 @@ fn is_empty_dir(dir: &Path) -> bool {
 fn protected() -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = Vec::new();
     if let Some(h) = home() {
-        for d in [".claude", ".codex", ".gemini", ".cursor", ".cline", ".local/share/opencode", ".config/opencode"] {
+        for d in [".claude", ".codex", ".gemini", ".cursor", ".cline", ".grok", ".local/share/opencode", ".config/opencode"] {
             v.push(h.join(d));
         }
     }
@@ -105,7 +105,7 @@ fn protected() -> Vec<PathBuf> {
             v.push(p);
         }
     }
-    if let Some(app) = env_path("APPDATA") {
+    if let Some(app) = env_path("APPDATA").or_else(config_home) {
         for d in ["Claude", "Cursor", "Code", "Windsurf", "VSCodium", "Codex"] {
             v.push(app.join(d));
         }
@@ -163,7 +163,14 @@ pub fn check(chosen: &str) -> Result<Check, String> {
     }
     let raw = PathBuf::from(chosen);
     if !raw.is_absolute() {
-        return Err("Choose a full folder path, for example D:\\Backups\\ChatVault.".into());
+        #[cfg(windows)]
+        {
+            return Err("Choose a full folder path, for example D:\\Backups\\ChatVault.".into());
+        }
+        #[cfg(not(windows))]
+        {
+            return Err("Choose a full folder path, for example /home/you/Backups/ChatVault.".into());
+        }
     }
     if raw.parent().is_none() {
         return Err("A whole drive cannot be the backup folder. Make a folder on it.".into());
@@ -340,7 +347,10 @@ mod tests {
     fn refuses_drive_roots_files_and_folders_with_other_content() {
         assert!(check("").is_err());
         assert!(check("relative\\path").is_err());
+        #[cfg(windows)]
         assert!(check("C:\\").is_err(), "a whole drive is refused");
+        #[cfg(unix)]
+        assert!(check("/").is_err(), "a whole drive is refused");
         let dir = temp("busy");
         fs::write(dir.join("notes.txt"), "mine").unwrap();
         assert!(check(&dir.to_string_lossy()).unwrap_err().contains("other files"));

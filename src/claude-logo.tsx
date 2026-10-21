@@ -163,12 +163,35 @@ export function ProviderStack({ providers, max = 4, className }: { providers: Pr
   );
 }
 
+/** A simple xAI-style X mark that inverts with the theme. */
+export function GrokLogo({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden>
+      <rect width="24" height="24" rx="5" className="fill-foreground" />
+      <path d="M7 7 L17 17 M17 7 L7 17" className="stroke-background" strokeWidth="2.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** Inbox mark for chats brought in from NousSave and similar exports. */
+export function ImportedLogo({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden fill="none">
+      <rect width="24" height="24" rx="5" className="fill-sky-500/20" />
+      <path d="M5.5 12.5 8 15.5h8l2.5-3V18a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5.5 18v-5.5Z" className="stroke-sky-600 dark:stroke-sky-400" strokeWidth="1.6" strokeLinejoin="round" />
+      <path d="M12 5.5v8M9 10.5 12 13.5 15 10.5" className="stroke-sky-600 dark:stroke-sky-400" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export function ProviderLogo({ provider, className }: { provider: Provider; className?: string }) {
   if (provider === "claude") return <ClaudeLogo className={className} />;
   if (provider === "codex") return <CodexLogo className={className} />;
   if (provider === "cursor") return <CursorLogo className={className} />;
   if (provider === "gemini") return <GeminiLogo className={className} />;
   if (provider === "opencode") return <OpenCodeLogo className={className} />;
+  if (provider === "grok") return <GrokLogo className={className} />;
+  if (provider === "imported") return <ImportedLogo className={className} />;
   return <ClineLogo className={className} />;
 }
 

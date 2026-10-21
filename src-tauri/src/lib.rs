@@ -2,8 +2,11 @@ mod backuploc;
 mod cursor;
 mod cli;
 mod codex_db;
+mod grok;
+mod imported;
 mod index;
 mod integrations;
+mod os;
 mod others;
 mod pageindex;
 mod paths;
@@ -76,6 +79,13 @@ fn clip_msg(mut m: Msg, max: usize) -> Msg {
         m.text = clip(&m.text, max);
     }
     m
+}
+
+#[tauri::command]
+async fn import_chats(paths: Vec<String>) -> Result<imported::ImportStats, String> {
+    tauri::async_runtime::spawn_blocking(move || imported::import_paths(&paths))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -267,11 +277,35 @@ fn last_err() -> &'static std::sync::Mutex<std::collections::HashMap<String, Str
 
 /// The newest installed Cursor agent: its own node and script, run directly so the message never passes through a shell.
 fn cursor_agent_entry() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
-    let root = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("cursor-agent").join("versions");
-    let mut dirs: Vec<_> = std::fs::read_dir(root).ok()?.flatten().filter(|e| e.path().join("index.js").exists() && e.path().join("node.exe").exists()).collect();
-    dirs.sort_by_key(|e| e.file_name());
-    let d = dirs.pop()?.path();
-    Some((d.join("node.exe"), d.join("index.js")))
+    let mut roots = Vec::new();
+    if let Some(p) = std::env::var_os("LOCALAPPDATA") {
+        roots.push(PathBuf::from(p).join("cursor-agent").join("versions"));
+    }
+    if let Some(h) = home() {
+        roots.push(h.join(".local/share/cursor-agent/versions"));
+        roots.push(h.join(".cursor/bin"));
+    }
+    if let Some(x) = env_path("XDG_DATA_HOME") {
+        roots.push(x.join("cursor-agent").join("versions"));
+    }
+    for root in roots {
+        if root.join("cursor-agent").is_file() {
+            return Some((root.join("cursor-agent"), PathBuf::new()));
+        }
+        let Ok(rd) = std::fs::read_dir(&root) else { continue };
+        let mut dirs: Vec<_> = rd.flatten().filter(|e| {
+            let p = e.path();
+            p.join("index.js").exists() && (p.join("node").exists() || p.join("node.exe").exists())
+        }).collect();
+        if dirs.is_empty() {
+            continue;
+        }
+        dirs.sort_by_key(|e| e.file_name());
+        let d = dirs.pop()?.path();
+        let node = if d.join("node.exe").exists() { d.join("node.exe") } else { d.join("node") };
+        return Some((node, d.join("index.js")));
+    }
+    None
 }
 
 fn finish(map: &mut std::collections::HashMap<String, Started>, key: &str) {
@@ -296,7 +330,6 @@ fn finish(map: &mut std::collections::HashMap<String, Started>, key: &str) {
 #[tauri::command]
 fn send_message(provider: String, id: String, cwd: Option<String>, message: String) -> Result<(), String> {
     use std::io::Write;
-    use std::os::windows::process::CommandExt;
     use std::process::Stdio;
     provider_ok(&provider)?;
     if message.trim().is_empty() {
@@ -313,7 +346,6 @@ fn send_message(provider: String, id: String, cwd: Option<String>, message: Stri
     if let Ok(mut e) = last_err().lock() {
         e.remove(&key);
     }
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let dir = cwd.filter(|d| Path::new(d).is_dir());
     let (mut cmd, name, via_stdin) = match provider.as_str() {
         "codex" => {
@@ -325,7 +357,10 @@ fn send_message(provider: String, id: String, cwd: Option<String>, message: Stri
             let (node, entry) = cursor_agent_entry().ok_or("Cursor's agent is not installed. Install it from cursor.com/cli.")?;
             let chat_id = id.rsplit(['\\', '/', ':']).next().unwrap_or(&id).to_string();
             let mut c = Command::new(node);
-            c.arg(entry).args(["-p", "--resume", &chat_id, "--force", "--trust"]);
+            if !entry.as_os_str().is_empty() {
+                c.arg(entry);
+            }
+            c.args(["-p", "--resume", &chat_id, "--force", "--trust"]);
             if let Some(d) = &dir {
                 c.arg("--workspace").arg(d);
             }
@@ -344,11 +379,11 @@ fn send_message(provider: String, id: String, cwd: Option<String>, message: Stri
     }
     let err_path = std::env::temp_dir().join(format!("chatvault-agent-{}.err", key.replace(':', "_")));
     let err_file = std::fs::File::create(&err_path).map_err(|e| e.to_string())?;
+    os::hide(&mut cmd);
     let mut child = cmd
         .stdin(if via_stdin { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::null())
         .stderr(Stdio::from(err_file))
-        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("Could not start {name}: {e}. Is it installed and on your PATH?"))?;
     if via_stdin {
@@ -363,10 +398,8 @@ fn send_message(provider: String, id: String, cwd: Option<String>, message: Stri
 /// Starts the tool's own sign-in (it opens your browser), so messages sent from ChatVault are allowed to run.
 #[tauri::command]
 fn agent_login(provider: String) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
     use std::process::Stdio;
     provider_ok(&provider)?;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut cmd = match provider.as_str() {
         "codex" => {
             let mut c = Command::new("codex");
@@ -376,7 +409,10 @@ fn agent_login(provider: String) -> Result<(), String> {
         "cursor" => {
             let (node, entry) = cursor_agent_entry().ok_or("Cursor's agent is not installed. Install it from cursor.com/cli.")?;
             let mut c = Command::new(node);
-            c.arg(entry).arg("login");
+            if !entry.as_os_str().is_empty() {
+                c.arg(entry);
+            }
+            c.arg("login");
             c.env("CURSOR_INVOKED_AS", "cursor-agent.cmd");
             c
         }
@@ -386,7 +422,8 @@ fn agent_login(provider: String) -> Result<(), String> {
             c
         }
     };
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(CREATE_NO_WINDOW).spawn().map_err(|e| format!("Could not start the sign-in: {e}"))?;
+    os::hide(&mut cmd);
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| format!("Could not start the sign-in: {e}"))?;
     Ok(())
 }
 
@@ -645,8 +682,7 @@ fn reveal_in_folder(path: String) -> Result<(), String> {
     } else {
         check_transcript(&path)?
     };
-    let p = p.to_string_lossy().trim_start_matches(r"\\?\").to_string();
-    Command::new("explorer").arg(format!("/select,{}", p)).spawn().map_err(|e| e.to_string())?;
+    os::reveal_file(&p)?;
     Ok(())
 }
 
@@ -655,29 +691,12 @@ fn open_folder(path: String) -> Result<(), String> {
     if !Path::new(&path).is_dir() {
         return Err("That folder no longer exists".into());
     }
-    Command::new("explorer").arg(&path).spawn().map_err(|e| e.to_string())?;
-    Ok(())
+    os::open_dir(Path::new(&path))
 }
 
 /// Sends a file or a folder to the Recycle Bin, so it can still be restored from there.
 fn recycle(target: &Path) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-    let plain = target.to_string_lossy().trim_start_matches(r"\\?\").to_string();
-    let script = if target.is_dir() {
-        "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($env:CHATVAULT_PATH, 'OnlyErrorDialogs', 'SendToRecycleBin')"
-    } else {
-        "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($env:CHATVAULT_PATH, 'OnlyErrorDialogs', 'SendToRecycleBin')"
-    };
-    let status = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .env("CHATVAULT_PATH", &plain)
-        .creation_flags(0x0800_0000)
-        .status()
-        .map_err(|e| e.to_string())?;
-    if !status.success() || Path::new(&plain).exists() {
-        return Err("It could not be moved to the Recycle Bin".into());
-    }
-    Ok(())
+    os::recycle(target)
 }
 
 /// Moves a chat transcript to the Recycle Bin, so it can still be restored from there.
@@ -696,13 +715,10 @@ async fn delete_chat(path: String) -> Result<(), String> {
                 return Err(status.error.unwrap_or_else(|| "OpenCode is not installed".to_string()));
             }
             let exe = status.path.ok_or("OpenCode path is missing")?;
-            use std::os::windows::process::CommandExt;
-            let out = Command::new(exe)
-                .args(["session", "delete", id])
-                .stdin(std::process::Stdio::null())
-                .creation_flags(0x0800_0000)
-                .output()
-                .map_err(|e| format!("Could not run OpenCode: {e}"))?;
+            let mut cmd = Command::new(exe);
+            cmd.args(["session", "delete", id]).stdin(std::process::Stdio::null());
+            os::hide(&mut cmd);
+            let out = cmd.output().map_err(|e| format!("Could not run OpenCode: {e}"))?;
             if !out.status.success() {
                 let why = String::from_utf8_lossy(&out.stderr);
                 let why = why.lines().find(|l| !l.trim().is_empty()).unwrap_or("it returned an error");
@@ -712,7 +728,7 @@ async fn delete_chat(path: String) -> Result<(), String> {
             return Ok(());
         }
         // Gemini, Cline and Cursor keep chats as files or folders: those go to the Recycle Bin like Claude and Codex.
-        let target = if path.starts_with("gemini:") || path.starts_with("cline:") {
+        let target = if path.starts_with("gemini:") || path.starts_with("cline:") || path.starts_with("grok:") || path.starts_with("imported:") {
             others::deletable(&path)
         } else if path.starts_with("cursor-transcript:") || path.starts_with("cursor-cli:") {
             cursor::deletable(&path)
@@ -737,22 +753,7 @@ async fn delete_chat(path: String) -> Result<(), String> {
         }
         let p = check_transcript(&path)?;
         let plain = p.to_string_lossy().trim_start_matches(r"\\?\").to_string();
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let status = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($env:CHATVAULT_PATH, 'OnlyErrorDialogs', 'SendToRecycleBin')",
-            ])
-            .env("CHATVAULT_PATH", &plain)
-            .creation_flags(CREATE_NO_WINDOW)
-            .status()
-            .map_err(|e| e.to_string())?;
-        if !status.success() || Path::new(&plain).exists() {
-            return Err("The chat file could not be moved to the Recycle Bin".into());
-        }
+        recycle(&p).map_err(|_| "The chat file could not be moved to the Recycle Bin".to_string())?;
         index::forget(&path)?;
         index::forget(&plain)?;
         Ok(())
@@ -774,8 +775,7 @@ fn open_in_cursor(path: String) -> Result<(), String> {
 fn open_backup_folder() -> Result<(), String> {
     let b = backup_root().ok_or("No Documents folder")?;
     fs::create_dir_all(&b).map_err(|e| e.to_string())?;
-    Command::new("explorer").arg(&b).spawn().map_err(|e| e.to_string())?;
-    Ok(())
+    os::open_dir(&b)
 }
 
 #[tauri::command]
@@ -783,11 +783,7 @@ fn open_in_claude(local_id: String) -> Result<(), String> {
     if !local_id.starts_with("local_") || !local_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
         return Err("Invalid session id".into());
     }
-    Command::new("cmd")
-        .args(["/C", "start", "", &format!("claude://claude.ai/epitaxy/{}", local_id)])
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    os::open_url(&format!("claude://claude.ai/epitaxy/{}", local_id))
 }
 
 #[tauri::command]
@@ -966,8 +962,7 @@ async fn read_file_bytes(path: String, base: Option<String>) -> Result<tauri::ip
 #[tauri::command]
 fn reveal_file(path: String, base: Option<String>) -> Result<(), String> {
     let canon = resolve_file(&path, &base, None)?;
-    Command::new("explorer").arg(format!("/select,{}", plain(&canon))).spawn().map_err(|e| e.to_string())?;
-    Ok(())
+    os::reveal_file(&canon)
 }
 
 /// Opens a file from a chat with the app Windows uses for it. Programs and scripts are never started this way.
@@ -975,14 +970,11 @@ fn reveal_file(path: String, base: Option<String>) -> Result<(), String> {
 fn open_file_default(path: String, base: Option<String>) -> Result<(), String> {
     let canon = resolve_file(&path, &base, None)?;
     let ext = canon.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-    const BLOCKED: [&str; 22] = ["exe", "com", "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "msi", "msp", "scr", "lnk", "hta", "reg", "cpl", "dll", "jar", "pif", "appx"];
+    const BLOCKED: [&str; 26] = ["exe", "com", "bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "msi", "msp", "scr", "lnk", "hta", "reg", "cpl", "dll", "jar", "pif", "appx", "sh", "so", "appimage", "desktop"];
     if BLOCKED.contains(&ext.as_str()) {
         return Err("Programs and scripts are not opened from here. Use Show in folder instead.".into());
     }
-    // Explorer opens the file with its default app and reads the name as plain text, so characters such as & or % in
-    // a file name are never treated as commands, as they are by `cmd /C start`.
-    Command::new("explorer").arg(plain(&canon)).spawn().map_err(|e| e.to_string())?;
-    Ok(())
+    os::open_path(&canon)
 }
 
 /// Reads a text file mentioned in a chat so it can be shown in the viewer: at most 1.5 MB, text only.
@@ -1049,7 +1041,7 @@ struct ExportDone {
     error: Option<String>,
 }
 
-const EXPORT_TOOLS: [(&str, &str); 6] = [("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor"), ("gemini", "Gemini CLI"), ("opencode", "OpenCode"), ("cline", "Cline")];
+const EXPORT_TOOLS: [(&str, &str); 8] = [("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor"), ("gemini", "Gemini CLI"), ("opencode", "OpenCode"), ("cline", "Cline"), ("grok", "Grok"), ("imported", "Imported")];
 
 /// Reads one chat and returns its Markdown, or None when it has nothing readable. File names depend only on the chat, so
 /// exporting again to the same folder replaces the earlier files instead of piling up copies.
@@ -1177,7 +1169,7 @@ fn save_markdown(title: String, markdown: String) -> Result<String, String> {
     let safe: String = title.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' { c } else { '_' }).collect();
     let file = dir.join(format!("{}.md", clip(safe.trim(), 60).trim_end_matches('…')));
     fs::write(&file, markdown).map_err(|e| e.to_string())?;
-    Command::new("explorer").arg(format!("/select,{}", file.to_string_lossy())).spawn().map_err(|e| e.to_string())?;
+    os::reveal_file(&file)?;
     Ok(file.to_string_lossy().to_string())
 }
 
@@ -1204,7 +1196,8 @@ fn is_ps_quote(c: char) -> bool {
 
 /// Text made safe to sit inside a single-quoted PowerShell string: every kind of quote is doubled, and line breaks
 /// become spaces, so nothing typed or pasted can end the string and run as a command.
-fn ps_single_quoted_inner(text: &str) -> String {
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn ps_single_quoted_inner(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         if is_ps_quote(c) {
@@ -1217,6 +1210,28 @@ fn ps_single_quoted_inner(text: &str) -> String {
         }
     }
     out
+}
+
+fn shell_quote(s: &str) -> String {
+    #[cfg(windows)]
+    {
+        format!("'{}'", ps_single_quoted_inner(s))
+    }
+    #[cfg(not(windows))]
+    {
+        let mut out = String::from("'");
+        for c in s.chars() {
+            if c == '\'' {
+                out.push_str("'\\''");
+            } else if c == '\r' || c == '\n' {
+                out.push(' ');
+            } else {
+                out.push(c);
+            }
+        }
+        out.push('\'');
+        out
+    }
 }
 
 /// Opens a new PowerShell window in the chat's folder and starts Claude Code or Codex there.
@@ -1239,10 +1254,9 @@ fn launch_agent_inner(agent: String, id: String, cwd: Option<String>, handoff: O
         }
         Ok(path)
     };
-    // The prompt ChatVault built (same text as "Copy prompt"), as the inside of a single-quoted PowerShell string.
     let text = |path: &str| -> String {
         match &prompt {
-            Some(p) if !p.trim().is_empty() => ps_single_quoted_inner(p),
+            Some(p) if !p.trim().is_empty() => p.clone(),
             _ => format!("Read the file {} completely. {}", path, HANDOFF_PROMPT),
         }
     };
@@ -1257,7 +1271,7 @@ fn launch_agent_inner(agent: String, id: String, cwd: Option<String>, handoff: O
         "claude-handoff" => {
             let path = handoff_path(handoff)?;
             let folder = Path::new(&path).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-            format!("claude '{}' --add-dir '{}'", text(&path), folder)
+            format!("claude {} --add-dir {}", shell_quote(&text(&path)), shell_quote(&folder))
         }
         "codex-resume" | "codex-fork" => {
             if !valid_id(&id) {
@@ -1267,24 +1281,24 @@ fn launch_agent_inner(agent: String, id: String, cwd: Option<String>, handoff: O
         }
         "codex-handoff" => {
             let path = handoff_path(handoff)?;
-            format!("codex '{}'", text(&path))
+            format!("codex {}", shell_quote(&text(&path)))
         }
         "gemini-handoff" => {
             let path = handoff_path(handoff)?;
             let folder = Path::new(&path).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-            format!("gemini --prompt-interactive '{}' --include-directories '{}'", text(&path), folder)
+            format!("gemini --prompt-interactive {} --include-directories {}", shell_quote(&text(&path)), shell_quote(&folder))
         }
         "opencode-handoff" => {
             let path = handoff_path(handoff)?;
-            format!("opencode --prompt '{}'", text(&path))
+            format!("opencode --prompt {}", shell_quote(&text(&path)))
         }
         "cline-handoff" => {
             let path = handoff_path(handoff)?;
-            format!("cline --tui --auto-approve false '{}'", text(&path))
+            format!("cline --tui --auto-approve false {}", shell_quote(&text(&path)))
         }
         "cursor-handoff" => {
             let path = handoff_path(handoff)?;
-            format!("cursor-agent '{}'", text(&path))
+            format!("cursor-agent {}", shell_quote(&text(&path)))
         }
         _ => return Err("Unknown agent".into()),
     };
@@ -1293,26 +1307,14 @@ fn launch_agent_inner(agent: String, id: String, cwd: Option<String>, handoff: O
     if !status.ready { return Err(status.error.unwrap_or_else(|| "CLI is not installed. Use Install in the Continue menu.".into())); }
     let path = status.path.ok_or("CLI path is missing")?;
     let (_, arguments) = script.split_once(' ').ok_or("Missing CLI arguments")?;
-    // A script file avoids cmd.exe's short command-line limit for handoff prompts.
     let script_path = cli::script_file("")?;
     let receipt = script_path.with_extension("launch-error.txt");
-    fs::write(&script_path, format!("\u{feff}{}", cli::launch_script(&path, arguments, &receipt.to_string_lossy()))).map_err(|e| e.to_string())?;
-    use std::os::windows::process::CommandExt;
-    // The terminal is opened through `cmd /C start`, which creates its console properly. Starting PowerShell directly
-    // from this window-only app gave the new console no usable input or output, so full-screen tools such as
-    // OpenCode ran but drew nothing, and could not be typed into. It also keeps the terminal independent of ChatVault.
-    let shell = cli::powershell();
-    Command::new("cmd")
-        .arg("/C")
-        .arg("start")
-        .arg("")
-        .arg(shell.get_program())
-        .args(["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-NoExit", "-File"])
-        .arg(&script_path)
-        .current_dir(dir)
-        .creation_flags(0x0800_0000)
-        .spawn()
-        .map_err(|e| format!("Could not open terminal: {e}"))?;
+    let body = cli::launch_script(&path, arguments, &receipt.to_string_lossy());
+    #[cfg(windows)]
+    fs::write(&script_path, format!("\u{feff}{body}")).map_err(|e| e.to_string())?;
+    #[cfg(not(windows))]
+    fs::write(&script_path, body).map_err(|e| e.to_string())?;
+    os::launch_terminal(&script_path, &dir)?;
     for _ in 0..15 {
         if let Ok(error) = fs::read_to_string(&receipt) { return Err(error); }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1337,6 +1339,7 @@ struct AccountInfo {
 #[tauri::command]
 fn account_info() -> Vec<AccountInfo> {
     let desktop_current = env_path("APPDATA")
+        .or_else(config_home)
         .map(|p| p.join("Claude").join("config.json"))
         .and_then(|p| fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
@@ -1508,6 +1511,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            import_chats,
             refresh_index,
             query_chats,
             provider_overview,

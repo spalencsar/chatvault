@@ -9,7 +9,12 @@ pub fn env_path(name: &str) -> Option<PathBuf> {
 }
 
 pub fn home() -> Option<PathBuf> {
-    env_path("USERPROFILE")
+    env_path("HOME").or_else(|| env_path("USERPROFILE"))
+}
+
+/// Roaming app data on Windows (`APPDATA`), `~/.config` on Linux.
+pub fn config_home() -> Option<PathBuf> {
+    env_path("APPDATA").or_else(|| env_path("XDG_CONFIG_HOME")).or_else(|| home().map(|h| h.join(".config")))
 }
 
 pub fn claude_projects() -> Option<PathBuf> {
@@ -17,7 +22,9 @@ pub fn claude_projects() -> Option<PathBuf> {
 }
 
 pub fn claude_meta() -> Option<PathBuf> {
-    env_path("APPDATA").map(|p| p.join("Claude").join("claude-code-sessions"))
+    env_path("APPDATA")
+        .map(|p| p.join("Claude").join("claude-code-sessions"))
+        .or_else(|| config_home().map(|p| p.join("Claude").join("claude-code-sessions")))
 }
 
 pub fn codex_home() -> Option<PathBuf> {
@@ -57,7 +64,10 @@ pub fn backup_root() -> Option<PathBuf> {
 }
 
 pub fn data_dir() -> Option<PathBuf> {
-    env_path("LOCALAPPDATA").map(|p| p.join("ChatVault"))
+    env_path("LOCALAPPDATA")
+        .map(|p| p.join("ChatVault"))
+        .or_else(|| env_path("XDG_DATA_HOME").map(|p| p.join("chatvault")))
+        .or_else(|| home().map(|h| h.join(".local/share/chatvault")))
 }
 
 pub fn subdirs(p: &Path) -> Vec<PathBuf> {

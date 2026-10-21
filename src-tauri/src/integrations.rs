@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::sync::RwLock;
 
-pub const ALL: [&str; 6] = ["claude", "codex", "cursor", "gemini", "opencode", "cline"];
+pub const ALL: [&str; 8] = ["claude", "codex", "cursor", "gemini", "opencode", "cline", "grok", "imported"];
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct Config {

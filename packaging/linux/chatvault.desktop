@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ChatVault
+Comment=Local dashboard for Claude, Codex, Cursor, Grok and imported web chats
+Exec=chatvault
+Icon=chatvault
+Terminal=false
+StartupNotify=true
+StartupWMClass=chatvault
+Categories=Development;
+Keywords=chat;claude;codex;grok;cursor;gemini;

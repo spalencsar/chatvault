@@ -21,7 +21,9 @@ pub struct CursorChat {
 }
 
 fn appdata_cursor() -> Option<PathBuf> {
-    env_path("APPDATA").map(|p| p.join("Cursor").join("User"))
+    env_path("APPDATA")
+        .map(|p| p.join("Cursor").join("User"))
+        .or_else(|| config_home().map(|p| p.join("Cursor").join("User")))
 }
 
 fn global_db() -> Option<PathBuf> {

@@ -4,7 +4,7 @@
 use crate::paths::*;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -28,8 +28,15 @@ pub struct Source {
 }
 
 fn plain(p: &Path) -> String {
-    // One kind of slash, so a path reads the same wherever it is shown.
-    p.to_string_lossy().trim_start_matches(r"\\?\").replace('/', "\\")
+    let s = p.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+    #[cfg(windows)]
+    {
+        s.replace('/', "\\")
+    }
+    #[cfg(not(windows))]
+    {
+        s
+    }
 }
 
 /// A folder of chat files. With `count`, the files are counted and measured.
@@ -133,6 +140,23 @@ pub fn all(count_all: bool) -> Vec<Source> {
         }
     }
     out.push(Source { provider: "cline".into(), name: "Cline".into(), enabled: on("cline"), locations: cline });
+
+    let count = count_all && on("grok");
+    let mut grok = Vec::new();
+    if let Some(r) = crate::grok::sessions_root() {
+        grok.push(folder("Chats", &r, &["jsonl"], count));
+    }
+    out.push(Source { provider: "grok".into(), name: "Grok".into(), enabled: on("grok"), locations: grok });
+
+    let count = count_all && on("imported");
+    let mut imported = Vec::new();
+    if let Some(r) = crate::imported::ensure_inbox() {
+        imported.push(dir("Drop folder (NousSave JSON or Markdown)", &r, None));
+    }
+    if let Some(r) = crate::imported::root() {
+        imported.push(dir("Copied into ChatVault", &r, count.then(|| crate::imported::chat_files().len())));
+    }
+    out.push(Source { provider: "imported".into(), name: "Imported".into(), enabled: on("imported"), locations: imported });
     out
 }
 
@@ -145,9 +169,9 @@ pub fn open(path: &str) -> Result<(), String> {
     }
     let p = PathBuf::from(path);
     if p.is_dir() {
-        Command::new("explorer").arg(&p).spawn().map_err(|e| e.to_string())?;
+        crate::os::open_dir(&p)?;
     } else if p.is_file() {
-        Command::new("explorer").arg(format!("/select,{}", path)).spawn().map_err(|e| e.to_string())?;
+        crate::os::reveal_file(&p)?;
     } else {
         return Err("That location does not exist on this PC.".into());
     }
@@ -173,9 +197,10 @@ mod tests {
     fn every_tool_is_listed_and_only_listed_places_can_be_opened() {
         let all = all(false);
         let ids: Vec<&str> = all.iter().map(|s| s.provider.as_str()).collect();
-        assert_eq!(ids, ["claude", "codex", "cursor", "gemini", "opencode", "cline"]);
+        assert_eq!(ids, ["claude", "codex", "cursor", "gemini", "opencode", "cline", "grok", "imported"]);
         assert!(all.iter().all(|s| !s.locations.is_empty()), "each tool shows at least one place");
         assert!(open("C:\\Windows\\System32").is_err(), "an unlisted place is refused");
+        assert!(open("/etc").is_err(), "an unlisted place is refused");
         assert!(open("").is_err());
     }
 }

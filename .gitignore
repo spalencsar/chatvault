@@ -28,3 +28,10 @@ video/
 
 # Browser test output from local checks; it contains real chat titles
 .playwright-cli/
+
+# Local env and crash dumps
+.env
+.env.*
+*.core
+core
+/tmp/

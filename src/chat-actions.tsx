@@ -21,11 +21,11 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-export type Provider = "claude" | "codex" | "cursor" | "gemini" | "opencode" | "cline";
+export type Provider = "claude" | "codex" | "cursor" | "gemini" | "opencode" | "cline" | "grok" | "imported";
 /** What the sidebar lists: one tool, or every tool together. */
 export type Tool = Provider | "all";
-const EVERY_PROVIDER: Provider[] = ["claude", "codex", "cursor", "gemini", "opencode", "cline"];
-const EVERY_CORE: Provider[] = ["claude", "codex", "cursor"];
+const EVERY_PROVIDER: Provider[] = ["claude", "codex", "cursor", "grok", "gemini", "opencode", "cline", "imported"];
+const EVERY_CORE: Provider[] = ["claude", "codex", "cursor", "grok"];
 /** The tools ChatVault looks at. A tool switched off in Settings is left out, so every list and chart that reads this drops it. */
 export const PROVIDERS: Provider[] = [...EVERY_PROVIDER];
 /** The tools always shown on the overview. The others appear once ChatVault finds their chats. */
@@ -53,7 +53,7 @@ export const deleteKind = (c: { provider: Provider; path: string }): DeleteKind 
 /** What a click on a grayed Delete tells the user. */
 export const deleteBlockedMessage = (tool: string) =>
   `This chat is stored inside ${tool} itself, so ChatVault can't delete it. Delete it in ${tool}, or use Archive to hide it here.`;
-export const PROVIDER_SHORT: Record<Provider, string> = { claude: "Claude", codex: "Codex", cursor: "Cursor", gemini: "Gemini", opencode: "OpenCode", cline: "Cline" };
+export const PROVIDER_SHORT: Record<Provider, string> = { claude: "Claude", codex: "Codex", cursor: "Cursor", gemini: "Gemini", opencode: "OpenCode", cline: "Cline", grok: "Grok", imported: "Imported" };
 
 export type Chat = {
   provider: Provider;
@@ -97,7 +97,7 @@ export type AccountInfo = {
   plan: string | null;
 };
 
-export const PROVIDER_NAME: Record<Provider, string> = { claude: "Claude Code", codex: "Codex", cursor: "Cursor", gemini: "Gemini CLI", opencode: "OpenCode", cline: "Cline" };
+export const PROVIDER_NAME: Record<Provider, string> = { claude: "Claude Code", codex: "Codex", cursor: "Cursor", gemini: "Gemini CLI", opencode: "OpenCode", cline: "Cline", grok: "Grok", imported: "Imported" };
 
 export const fmtDate = (ms: number) =>
   new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
@@ -132,9 +132,15 @@ let customAccountNames: Record<string, string> = {};
 export const setCustomAccountNames = (names: Record<string, string>) => {
   customAccountNames = names;
 };
-/** The email when it is known (Gemini and Cursor store it as the account itself), otherwise the first 8 characters of the account id. */
-export const originalAccountLabel = (a: string) =>
-  a === "unknown" ? "Unknown account" : a === "local" ? "This computer" : a.includes("@") ? a : (accountEmails[a] ?? `Account ${a.slice(0, 8)}`);
+/** The email when it is known (Gemini and Cursor store it as the account itself), otherwise the first 8 characters of the account id. Named platforms from imported chats are shown as they are. */
+export const originalAccountLabel = (a: string) => {
+  if (a === "unknown") return "Unknown account";
+  if (a === "local") return "This computer";
+  if (a.includes("@")) return a;
+  if (accountEmails[a]) return accountEmails[a] as string;
+  if (/^[0-9a-f-]{8,}$/i.test(a)) return `Account ${a.slice(0, 8)}`;
+  return a;
+};
 /** The name you gave the account, or else its email or id. */
 export const accountLabel = (a: string) => customAccountNames[a] ?? originalAccountLabel(a);
 

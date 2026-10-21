@@ -3,7 +3,7 @@ import { Archive, Clock, FolderOpen, Pin } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ProviderLogo } from "@/claude-logo";
 import { ContextArea, type Entry } from "@/context-area";
-import { fmtDate, prettyProject, prettyTitle, type Chat } from "@/chat-actions";
+import { accountLabel, fmtDate, prettyProject, prettyTitle, type Chat } from "@/chat-actions";
 
 /**
  * One chat as a card: tool logo, title, project and (on hover) how long ago. Used by the sidebar and by "Pick up where you left off".
@@ -77,6 +77,13 @@ export function ChatCard({
               <>
                 <Clock className="size-3 shrink-0" strokeWidth={1.5} />
                 <span className="-ml-0.5 min-w-0 truncate tabular-nums">{fmtDate(chat.lastMs)}</span>
+              </>
+            ) : chat.provider === "imported" ? (
+              <>
+                <FolderOpen className="size-3 shrink-0" strokeWidth={1.5} />
+                <span className="-ml-0.5 min-w-0 truncate" title={accountLabel(chat.account)}>
+                  {accountLabel(chat.account)} · {fmtDate(chat.lastMs)}
+                </span>
               </>
             ) : (
               <>

@@ -10,7 +10,9 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const TOOLS: [&str; 3] = ["gemini", "opencode", "cline"];
+pub const TOOLS: [&str; 5] = ["gemini", "opencode", "cline", "grok", "imported"];
+/// For SQL `IN (...)` when the index rebuilds these tools together.
+pub const SQL_IN: &str = "'gemini','opencode','cline','grok','imported'";
 
 pub struct OtherChat {
     pub provider: &'static str,
@@ -22,6 +24,8 @@ pub struct OtherChat {
     pub size: i64,
     pub path: String,
     pub model: Option<String>,
+    /// Set for imported NousSave chats: the web platform (ChatGPT, Gemini, Grok, …).
+    pub account: Option<String>,
 }
 
 fn ms_of(iso: &str) -> Option<i64> {
@@ -166,6 +170,7 @@ fn scan_gemini(out: &mut Vec<OtherChat>) {
             size: fs::metadata(&p).map(|m| m.len() as i64).unwrap_or(0),
             path: format!("gemini:{}", p.to_string_lossy()),
             model: None,
+            account: None,
         });
     }
 }
@@ -220,6 +225,7 @@ fn scan_opencode_db(db:&Path,out:&mut Vec<OtherChat>) {
             size: n * 2000,
             path: format!("opencode:{}|{}", db.display(), id),
             model: None,
+            account: None,
         });
     }
 }
@@ -294,7 +300,7 @@ pub fn cline_roots() -> Vec<PathBuf> {
     if let Some(h) = home() {
         roots.push(h.join(".cline/data/sessions"));
     }
-    if let Some(app) = env_path("APPDATA") {
+    if let Some(app) = env_path("APPDATA").or_else(config_home) {
         for editor in ["Code", "Code - Insiders", "Cursor", "Windsurf", "VSCodium"] {
             let user = app.join(editor).join("User");
             roots.push(user.join("globalStorage/saoudrizwan.claude-dev/tasks"));
@@ -427,6 +433,7 @@ fn scan_cline(out: &mut Vec<OtherChat>) {
             size: fs::metadata(&p).map(|m| m.len() as i64).unwrap_or(0),
             path: format!("cline:{}", p.to_string_lossy()),
             model: mj.as_ref().and_then(|m| m.get("model")).and_then(|s| s.as_str()).map(String::from),
+            account: None,
         });
     }
 }
@@ -438,6 +445,8 @@ pub fn scan() -> Vec<OtherChat> {
     scan_gemini(&mut out);
     scan_opencode(&mut out);
     scan_cline(&mut out);
+    crate::grok::scan(&mut out);
+    crate::imported::scan(&mut out);
     out
 }
 
@@ -456,7 +465,7 @@ pub fn fingerprint() -> i64 {
         wal.push("-wal");
         m = m.max(mtime(Path::new(&wal)));
     }
-    m
+    m.max(crate::grok::fingerprint()).max(crate::imported::fingerprint())
 }
 
 pub fn read(path: &str) -> Result<Vec<Msg>, String> {
@@ -468,6 +477,12 @@ pub fn read(path: &str) -> Result<Vec<Msg>, String> {
     }
     if let Some(p) = path.strip_prefix("cline:") {
         return Ok(cline_messages(Path::new(p)));
+    }
+    if let Some(p) = path.strip_prefix("grok:") {
+        return Ok(crate::grok::messages(Path::new(p)));
+    }
+    if let Some(p) = path.strip_prefix("imported:") {
+        return Ok(crate::imported::messages(Path::new(p)));
     }
     Err("Unknown chat".into())
 }
@@ -490,6 +505,12 @@ pub fn deletable(path: &str) -> Option<PathBuf> {
         let task = listed.parent().filter(|d| listed.file_name().is_some_and(|n| n == "api_conversation_history.json") && d.parent().and_then(|t| t.file_name()).is_some_and(|n| n == "tasks"));
         return Some(task.map(Path::to_path_buf).unwrap_or(listed));
     }
+    if path.starts_with("grok:") {
+        return crate::grok::deletable(path);
+    }
+    if path.starts_with("imported:") {
+        return crate::imported::deletable(path);
+    }
     None
 }
 
@@ -504,6 +525,12 @@ pub fn real_file(path: &str) -> Option<PathBuf> {
             return opencode_dbs().into_iter().find(|p|p==Path::new(db));
         }
         return opencode_db();
+    }
+    if path.starts_with("grok:") {
+        return crate::grok::real_file(path);
+    }
+    if path.starts_with("imported:") {
+        return crate::imported::real_file(path);
     }
     None
 }

@@ -2,15 +2,17 @@
 
 ## Supported versions
 
-Only the [latest release](https://github.com/ssanaullahrais/Chat-Vault/releases/latest) receives fixes.
+This Linux port tracks the local `main` branch. There is no separate LTS.
+
+Upstream Windows releases: https://github.com/ssanaullahrais/Chat-Vault/releases
 
 ## Reporting a vulnerability
 
-Please report security problems privately through GitHub:
-[Report a vulnerability](https://github.com/ssanaullahrais/Chat-Vault/security/advisories/new).
+Mail **hello@linuxcommand.dev**. Do not open a public issue for a security problem.
 
-Do not open a public issue for a security problem. You will get a reply as soon as possible, and a fix will be released before the details are made public.
+For issues that also affect upstream Windows ChatVault, report them privately to the original project as well:
+https://github.com/ssanaullahrais/Chat-Vault/security/advisories/new
 
 ## What ChatVault touches
 
-ChatVault reads the chat files your AI tools already keep on your PC and copies them to a folder in your Documents. It sends no chat content anywhere. See the Privacy section of the README.
+ChatVault reads chat files that the tools already keep on this machine and can copy them into a backup folder. It does not upload chat content. The GitHub auto-updater from upstream is disabled in this fork.

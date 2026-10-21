@@ -86,6 +86,14 @@ fn pairs(forward: bool) -> Vec<(PathBuf, PathBuf)> {
             let db = h.join(".local").join("share").join("opencode");
             maps.push((db, b.join("opencode"), 4));
         }
+        if on("grok") {
+            maps.push((h.join(".grok").join("sessions"), b.join("grok").join("sessions"), 5));
+        }
+    }
+    if on("imported") {
+        if let Some(d) = crate::imported::root() {
+            maps.push((d, b.join("imported"), 0));
+        }
     }
     let mut out = Vec::new();
     for (live, back, filter) in maps {
@@ -113,6 +121,13 @@ fn pairs(forward: bool) -> Vec<(PathBuf, PathBuf)> {
             // OpenCode: just its database file.
             if filter == 4 && f.file_name().map(|n| n != "opencode.db").unwrap_or(true) {
                 continue;
+            }
+            // Grok: session transcripts and the summary next to them.
+            if filter == 5 {
+                let name = f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                if name != "chat_history.jsonl" && name != "summary.json" {
+                    continue;
+                }
             }
             out.push((f.clone(), to.join(rel)));
         }

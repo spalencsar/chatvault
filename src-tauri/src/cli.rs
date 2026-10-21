@@ -1,5 +1,6 @@
 //! CLI checks and explicit, user-initiated installation for the Continue menu.
 use serde::Serialize;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::{
     fs,
@@ -79,8 +80,26 @@ fn tool(id: &str) -> Result<Tool, String> {
     })
 }
 
+fn install_cmd(id: &str, t: &Tool) -> &'static str {
+    #[cfg(windows)]
+    {
+        let _ = id;
+        t.install
+    }
+    #[cfg(not(windows))]
+    {
+        match id {
+            "claude" => "curl -fsSL https://claude.ai/install.sh | bash",
+            "codex" => "npm install -g @openai/codex@latest",
+            "cursor" => "curl -fsS https://cursor.com/install | bash",
+            _ => t.install,
+        }
+    }
+}
+
 // A running GUI may have inherited PATH before a CLI was installed. Preserve it,
 // and include the current persisted PATH plus the vendors' standard user folders.
+#[cfg(windows)]
 pub const ENVIRONMENT: &str = r#"
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -109,6 +128,12 @@ function Find-Cli($names) {
 }
 "#;
 
+#[cfg(not(windows))]
+pub const ENVIRONMENT: &str = r#"
+export PATH="$PATH:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.local/share/mise/shims:${XDG_DATA_HOME:-$HOME/.local/share}/mise/shims:${NPM_CONFIG_PREFIX:-$HOME/.npm-global}/bin"
+"#;
+
+#[cfg(windows)]
 pub fn powershell() -> Command {
     let exe = std::env::var_os("SystemRoot")
         .map(std::path::PathBuf::from)
@@ -125,10 +150,23 @@ pub fn script_file(script: &str) -> Result<std::path::PathBuf, String> {
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_nanos();
-    let path =
-        std::env::temp_dir().join(format!("chatvault-cli-{}-{stamp}.ps1", std::process::id()));
-    // Windows PowerShell needs a BOM to read non-ASCII prompts in UTF-8 scripts.
+    #[cfg(windows)]
+    let path = std::env::temp_dir().join(format!("chatvault-cli-{}-{stamp}.ps1", std::process::id()));
+    #[cfg(not(windows))]
+    let path = std::env::temp_dir().join(format!("chatvault-cli-{}-{stamp}.sh", std::process::id()));
+    #[cfg(windows)]
     fs::write(&path, format!("\u{feff}{script}")).map_err(|e| e.to_string())?;
+    #[cfg(not(windows))]
+    {
+        fs::write(&path, format!("#!/usr/bin/env bash\nset -e\n{script}\n")).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&path).map_err(|e| e.to_string())?.permissions();
+            perms.set_mode(0o700);
+            fs::set_permissions(&path, perms).map_err(|e| e.to_string())?;
+        }
+    }
     Ok(path)
 }
 
@@ -136,6 +174,7 @@ fn run(script: &str, timeout: Duration) -> Result<String, String> {
     let path = script_file(script)?;
     let stdout = path.with_extension("stdout.log");
     let stderr = path.with_extension("stderr.log");
+    #[cfg(windows)]
     let mut child = powershell()
         .args(["-NonInteractive", "-File"])
         .arg(&path)
@@ -144,17 +183,21 @@ fn run(script: &str, timeout: Duration) -> Result<String, String> {
         .stderr(fs::File::create(&stderr).map_err(|e| e.to_string())?)
         .spawn()
         .map_err(|e| format!("Could not start PowerShell: {e}"))?;
+    #[cfg(not(windows))]
+    let mut child = Command::new("bash")
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(fs::File::create(&stdout).map_err(|e| e.to_string())?)
+        .stderr(fs::File::create(&stderr).map_err(|e| e.to_string())?)
+        .spawn()
+        .map_err(|e| format!("Could not start bash: {e}"))?;
     let start = Instant::now();
     let status = loop {
         if let Some(s) = child.try_wait().map_err(|e| e.to_string())? {
             break s;
         }
         if start.elapsed() > timeout {
-            // Stop only this operation's process tree, including installer children.
-            let _ = Command::new("taskkill")
-                .args(["/PID", &child.id().to_string(), "/T", "/F"])
-                .creation_flags(0x08000000)
-                .status();
+            crate::os::kill_tree(child.id());
             let _ = child.wait();
             return Err("CLI operation timed out. Check the installation and try again.".into());
         }
@@ -189,18 +232,40 @@ fn run(script: &str, timeout: Duration) -> Result<String, String> {
 }
 
 fn resolve(commands: &[&str]) -> Result<Option<String>, String> {
-    let names = commands
-        .iter()
-        .map(|c| format!("'{c}'"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let path = run(
-        &format!("{ENVIRONMENT}\n$p = Find-Cli @({names}); if ($p) {{ Write-Output $p }}"),
-        Duration::from_secs(10),
-    )?;
-    Ok((!path.is_empty()).then_some(path))
+    #[cfg(windows)]
+    {
+        let names = commands
+            .iter()
+            .map(|c| format!("'{c}'"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let path = run(
+            &format!("{ENVIRONMENT}\n$p = Find-Cli @({names}); if ($p) {{ Write-Output $p }}"),
+            Duration::from_secs(10),
+        )?;
+        Ok((!path.is_empty()).then_some(path))
+    }
+    #[cfg(not(windows))]
+    {
+        for name in commands {
+            let path = run(
+                &format!("{ENVIRONMENT}\ncommand -v {name} || true"),
+                Duration::from_secs(10),
+            )?;
+            if !path.is_empty() {
+                return Ok(Some(path.lines().next().unwrap_or(&path).trim().to_string()));
+            }
+        }
+        Ok(None)
+    }
 }
 
+#[cfg(not(windows))]
+fn desktop(_id: &str) -> Result<(Option<String>, Option<String>), String> {
+    Ok((None, None))
+}
+
+#[cfg(windows)]
 fn desktop(id: &str) -> Result<(Option<String>, Option<String>), String> {
     // Desktop registration is evidence of an app, not evidence that its CLI is usable.
     // Only explicitly named bundled agent binaries are eligible for terminal launches.
@@ -283,23 +348,30 @@ pub fn status(id: &str) -> Result<CliStatus, String> {
         path: path.clone(),
         version: None,
         error: None,
-        install_command: t.install,
+        install_command: install_cmd(id, &t),
         docs_url: t.docs,
         prerequisite: None,
         desktop_path,
     };
     if let Some(path) = path {
-        let path = crate::ps_single_quoted_inner(&path);
+        #[cfg(windows)]
+        let quoted = crate::ps_single_quoted_inner(&path);
+        #[cfg(not(windows))]
+        let quoted = path.replace('\'', "'\\''");
+        #[cfg(windows)]
+        let version_script = format!(
+            "{ENVIRONMENT}\n& '{quoted}' --version\nif ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}"
+        );
+        #[cfg(not(windows))]
+        let version_script = format!("{ENVIRONMENT}\n'{quoted}' --version");
         match run(
-            &format!(
-                "{ENVIRONMENT}\n& '{path}' --version\nif ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}"
-            ),
+            &version_script,
             Duration::from_secs(20),
         ) {
             Ok(v) if !v.is_empty() => {
                 result.ready = true;
                 result.version = Some(v.chars().take(300).collect());
-                if let Err(error) = check_startup(id, &path) {
+                if let Err(error) = check_startup(id, &quoted) {
                     result.ready = false;
                     result.error = Some(error);
                 }
@@ -314,10 +386,13 @@ pub fn status(id: &str) -> Result<CliStatus, String> {
         if resolve(&["npm"])?.is_none() || resolve(&["node"])?.is_none() {
             result.prerequisite = Some("Install Node.js 22 LTS or newer, then check again.".into());
         } else {
-            let version = run(
-                &format!("{ENVIRONMENT}\n& (Find-Cli @('node')) --version"),
-                Duration::from_secs(10),
-            )?;
+            let node_version_script = {
+                #[cfg(windows)]
+                { format!("{ENVIRONMENT}\n& (Find-Cli @('node')) --version") }
+                #[cfg(not(windows))]
+                { format!("{ENVIRONMENT}\ncommand -v node >/dev/null && node --version") }
+            };
+            let version = run(&node_version_script, Duration::from_secs(10))?;
             let major = version
                 .trim_start_matches('v')
                 .split('.')
@@ -338,15 +413,17 @@ pub fn status(id: &str) -> Result<CliStatus, String> {
 // Newer versions expose a non-TUI startup diagnostic, which surfaces those errors.
 fn check_startup(id: &str, quoted_path: &str) -> Result<(), String> {
     if id != "opencode" { return Ok(()); }
-    let help = run(
-        &format!("{ENVIRONMENT}\n& '{quoted_path}' debug --help\nif ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}"),
-        Duration::from_secs(20),
-    )?;
+    #[cfg(windows)]
+    let help_script = format!("{ENVIRONMENT}\n& '{quoted_path}' debug --help\nif ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}");
+    #[cfg(not(windows))]
+    let help_script = format!("{ENVIRONMENT}\n'{quoted_path}' debug --help");
+    let help = run(&help_script, Duration::from_secs(20))?;
     if !help.contains("debug info") { return Ok(()); }
-    run(
-        &format!("{ENVIRONMENT}\n& '{quoted_path}' debug info\nif ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}"),
-        Duration::from_secs(20),
-    ).map(|_| ()).map_err(|error| format!("OpenCode was found, but its startup check failed:\n{error}\nUpdate OpenCode using its official setup instructions, then check again."))
+    #[cfg(windows)]
+    let info_script = format!("{ENVIRONMENT}\n& '{quoted_path}' debug info\nif ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}");
+    #[cfg(not(windows))]
+    let info_script = format!("{ENVIRONMENT}\n'{quoted_path}' debug info");
+    run(&info_script, Duration::from_secs(20)).map(|_| ()).map_err(|error| format!("OpenCode was found, but its startup check failed:\n{error}\nUpdate OpenCode using its official setup instructions, then check again."))
 }
 
 fn config_file() -> Result<std::path::PathBuf, String> {
@@ -366,13 +443,20 @@ pub async fn set_cli_path(tool: String, path: String) -> Result<CliStatus, Strin
         let executable = std::path::Path::new(&path)
             .canonicalize()
             .map_err(|e| e.to_string())?;
-        let ext = executable
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        if !executable.is_file() || !["exe", "cmd", "ps1"].contains(&ext.as_str()) {
-            return Err("Choose a CLI executable or command script (.exe, .cmd, or .ps1).".into());
+        #[cfg(windows)]
+        {
+            let ext = executable
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if !executable.is_file() || !["exe", "cmd", "ps1"].contains(&ext.as_str()) {
+                return Err("Choose a CLI executable or command script (.exe, .cmd, or .ps1).".into());
+            }
+        }
+        #[cfg(not(windows))]
+        if !executable.is_file() {
+            return Err("Choose a CLI executable.".into());
         }
         let file = config_file()?;
         let mut values: std::collections::BTreeMap<String, String> = fs::read(&file)
@@ -416,9 +500,18 @@ pub async fn install_cli(tool: String) -> Result<CliStatus, String> {
         if before.ready { return Ok(before); }
         if before.installed { return Err("This CLI is installed but cannot start. Check its error and setup instructions before reinstalling.".into()); }
         if let Some(p) = before.prerequisite { return Err(p); }
-        let command = if t.npm { t.install.replacen("npm ", "& (Find-Cli @('npm')) ", 1) } else { t.install.into() };
-        let setup = if tool == "codex" { "$env:CODEX_NON_INTERACTIVE='1'" } else { "" };
-        run(&format!("{ENVIRONMENT}\n{setup}\n{command}\nif ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}"), Duration::from_secs(600))?;
+        let command = install_cmd(&tool, &t);
+        #[cfg(windows)]
+        {
+            let command = if t.npm { command.replacen("npm ", "& (Find-Cli @('npm')) ", 1) } else { command.to_string() };
+            let setup = if tool == "codex" { "$env:CODEX_NON_INTERACTIVE='1'" } else { "" };
+            run(&format!("{ENVIRONMENT}\n{setup}\n{command}\nif ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}"), Duration::from_secs(600))?;
+        }
+        #[cfg(not(windows))]
+        {
+            let setup = if tool == "codex" { "export CODEX_NON_INTERACTIVE=1" } else { "" };
+            run(&format!("{ENVIRONMENT}\n{setup}\n{command}"), Duration::from_secs(600))?;
+        }
         let after = status(&tool)?;
         if !after.ready { return Err(after.error.unwrap_or_else(|| "Installation finished, but the CLI was not found. Check the official setup instructions.".into())); }
         Ok(after)
@@ -426,10 +519,12 @@ pub async fn install_cli(tool: String) -> Result<CliStatus, String> {
 }
 
 pub fn launch_script(path: &str, arguments: &str, receipt: &str) -> String {
-    let path = crate::ps_single_quoted_inner(path);
-    let receipt = crate::ps_single_quoted_inner(receipt);
-    format!(
-        r#"{ENVIRONMENT}
+    #[cfg(windows)]
+    {
+        let path = crate::ps_single_quoted_inner(path);
+        let receipt = crate::ps_single_quoted_inner(receipt);
+        format!(
+            r#"{ENVIRONMENT}
 try {{
     Write-Host 'Starting CLI. Complete sign-in in this window if requested.'
     & '{path}' {arguments}
@@ -440,12 +535,32 @@ try {{
     [IO.File]::WriteAllText('{receipt}', $message)
 }}
 "#
-    )
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let path = path.replace('\'', "'\\''");
+        let receipt = receipt.replace('\'', "'\\''");
+        format!(
+            r#"{ENVIRONMENT}
+echo 'Starting CLI. Complete sign-in in this window if requested.'
+set +e
+'{path}' {arguments}
+status=$?
+if [ "$status" -ne 0 ]; then
+  message="CLI exited with code $status. Review the output above."
+  echo "ChatVault could not continue this chat: $message"
+  printf '%s' "$message" > '{receipt}'
+fi
+"#
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
     #[test]
     fn opencode_startup_failure_blocks_version_only_readiness() {
         let fixture = script_file("param($command,$option)\nif ($option -eq '--help') { Write-Output 'opencode debug info'; exit 0 }\n[Console]::Error.WriteLine('no such column: name'); exit 1").unwrap();
@@ -455,11 +570,13 @@ mod tests {
         assert!(error.contains("no such column: name"));
         assert!(check_startup("claude", "missing.exe").is_ok());
     }
+    #[cfg(windows)]
     #[test]
     fn opencode_without_new_diagnostic_keeps_legacy_support() {
         let fixture = script_file("Write-Output 'opencode debug config'; exit 0").unwrap();
         assert!(check_startup("opencode", &crate::ps_single_quoted_inner(&fixture.to_string_lossy())).is_ok());
     }
+    #[cfg(windows)]
     #[test]
     fn command_discovery_handles_another_install_path() {
         let dir = script_file("")
@@ -492,11 +609,22 @@ mod tests {
     }
     #[test]
     fn launch_quotes_paths_and_preserves_prompt_arguments() {
-        let script = launch_script("C:\\O'Brien\\tool.cmd", "'hello'", "C:\\O'Brien\\error.txt");
-        assert!(script.contains("& 'C:\\O''Brien\\tool.cmd' 'hello'"));
-        assert!(script.contains("WriteAllText('C:\\O''Brien\\error.txt'"));
-        assert!(script.contains("CLI exited with code"));
+        #[cfg(windows)]
+        {
+            let script = launch_script("C:\\O'Brien\\tool.cmd", "'hello'", "C:\\O'Brien\\error.txt");
+            assert!(script.contains("& 'C:\\O''Brien\\tool.cmd' 'hello'"));
+            assert!(script.contains("WriteAllText('C:\\O''Brien\\error.txt'"));
+            assert!(script.contains("CLI exited with code"));
+        }
+        #[cfg(not(windows))]
+        {
+            let script = launch_script("/opt/O'Brien/tool", "'hello'", "/tmp/O'Brien/error.txt");
+            assert!(script.contains("'/opt/O'\\''Brien/tool' 'hello'"));
+            assert!(script.contains("'/tmp/O'\\''Brien/error.txt'"));
+            assert!(script.contains("CLI exited with code"));
+        }
     }
+    #[cfg(windows)]
     #[test]
     fn subprocess_preserves_unicode_and_reports_nonzero_exit() {
         assert_eq!(run("[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); Write-Output 'ready \u{03b1}'", Duration::from_secs(10)).unwrap(), "ready \u{03b1}");
@@ -507,6 +635,7 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("broken CLI"));
     }
+    #[cfg(windows)]
     #[test]
     fn hung_checks_are_bounded() {
         let before = Instant::now();
@@ -517,6 +646,18 @@ mod tests {
         );
         assert!(before.elapsed() < Duration::from_secs(8));
     }
+    #[cfg(not(windows))]
+    #[test]
+    fn hung_checks_are_bounded() {
+        let before = Instant::now();
+        assert!(
+            run("sleep 30", Duration::from_millis(400))
+                .unwrap_err()
+                .contains("timed out")
+        );
+        assert!(before.elapsed() < Duration::from_secs(8));
+    }
+    #[cfg(windows)]
     #[test]
     fn failed_launch_leaves_an_actionable_receipt() {
         let executable = script_file("throw 'fixture launch failure'").unwrap();

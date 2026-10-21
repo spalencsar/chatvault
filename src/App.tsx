@@ -11,6 +11,7 @@ import {
   Layers,
   DatabaseBackup,
   Eye,
+  FilePlus2,
   FolderOpen,
   Settings as SettingsIcon,
   Trash2,
@@ -43,6 +44,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Separator } from "@/components/ui/separator";
 import { AppToaster, notify, notifyError, runAction } from "@/toast";
 import { initBulkExport } from "@/bulk-export";
+import { describeImport, importNousSave } from "@/import-noussave";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { LucideIcon } from "lucide-react";
@@ -118,7 +120,7 @@ export default function App() {
   const [renamingAccount, setRenamingAccount] = useState<string | null>(null);
   const [accountOpen, setAccountOpen] = useState(false);
 
-  const [overview, setOverview] = useState<Record<Provider, Overview | null>>({ claude: null, codex: null, cursor: null, gemini: null, opencode: null, cline: null });
+  const [overview, setOverview] = useState<Record<Provider, Overview | null>>({ claude: null, codex: null, cursor: null, gemini: null, opencode: null, cline: null, grok: null, imported: null });
   const [accountInfo, setAccountInfo] = useState<AccountInfo[]>([]);
   const account = provider === "all" ? "all" : accounts[provider] ?? "all";
   const [query, setQuery] = useState("");
@@ -721,7 +723,7 @@ export default function App() {
   const accountList = provider === "all" ? [] : overview[provider]?.accounts ?? [];
   const accountItems = useMemo(
     () => ({
-      all: `All accounts · ${toolTotal(provider).toLocaleString()}`,
+      all: `${provider === "imported" ? "All platforms" : "All accounts"} · ${toolTotal(provider).toLocaleString()}`,
       ...Object.fromEntries(accountList.map((a) => [a.id, `${accountLabel(a.id)} · ${a.count.toLocaleString()}${provider === "claude" ? tag(a.id) : ""}`])),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -877,8 +879,9 @@ export default function App() {
     </>
   );
 
+  const listOrganize = provider === "imported" ? "project" : organize;
   const renderChatList = (list: Chat[]) => (
-    organize === "project"
+    listOrganize === "project"
                   ? groupByProject(list).map(([project, list]) => {
                       const isOpen = projectOpen(project);
                       return (
@@ -1162,8 +1165,25 @@ export default function App() {
             { id: "overview", label: "Back to Home", icon: <LayoutDashboard className="size-4" />, run: () => setSelected(null) },
             { id: "claude", label: "Show Claude chats", icon: <ProviderLogo provider="claude" className="size-4" />, run: () => switchProvider("claude") },
             { id: "codex", label: "Show Codex chats", icon: <ProviderLogo provider="codex" className="size-4" />, run: () => switchProvider("codex") },
+            { id: "grok", label: "Show Grok chats", icon: <ProviderLogo provider="grok" className="size-4" />, run: () => switchProvider("grok") },
             { id: "sync", label: "Sync & backup", icon: <DatabaseBackup className="size-4" />, run: () => setSyncOpen(true) },
             { id: "settings", label: "Settings", icon: <SettingsIcon className="size-4" />, run: () => setSettingsOpen(true) },
+            { id: "import", label: "Import NousSave chats", icon: <FilePlus2 className="size-4" />, run: () => {
+              void (async () => {
+                try {
+                  const r = await importNousSave(false);
+                  if (!r) return;
+                  if (r.added === 0 && r.failed.length) notifyError(describeImport(r));
+                  else notify(describeImport(r));
+                  if (r.added) {
+                    setProvider("imported");
+                    await rescan();
+                  }
+                } catch (e) {
+                  notifyError(e);
+                }
+              })();
+            } },
             { id: "refresh", label: "Scan this PC for new chats", icon: <RefreshCw className="size-4" />, run: () => void rescan() },
             { id: "theme", label: dark ? "Light theme" : "Dark theme", icon: dark ? <Sun className="size-4" /> : <Moon className="size-4" />, run: () => setDark((d) => !d) },
           ]}
@@ -1256,7 +1276,11 @@ const groupByProject = (list: Chat[]) => {
     if (g) g.push(c);
     else map.set(c.project, [c]);
   });
-  return [...map.entries()];
+  const entries = [...map.entries()];
+  if (list.length > 0 && list.every((c) => c.provider === "imported")) {
+    entries.sort((a, b) => a[0].localeCompare(b[0]));
+  }
+  return entries;
 };
 
 const orderChat = (list: ChatAction[]) => [...list.filter((a) => !a.danger), ...list.filter((a) => a.danger)];

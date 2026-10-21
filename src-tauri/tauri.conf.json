@@ -32,7 +32,9 @@
     "active": true,
     "targets": [
       "msi",
-      "nsis"
+      "nsis",
+      "appimage",
+      "deb"
     ],
     "icon": [
       "icons/32x32.png",
@@ -41,16 +43,14 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "shortDescription": "Browse every Claude Code chat on this PC",
+    "shortDescription": "Browse local AI chats on this PC",
     "publisher": "Sanaullah Rais",
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": false
   },
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY4NUQzRTVCNjlDODI2MDkKUldRSkpzaHBXejVkYUF2UlhJZEtOd0w0MlY3dU9NSzRncTFvM1RTVVRKcm03UnBnNkwxcHMrelkK",
-      "endpoints": [
-        "https://github.com/ssanaullahrais/Chat-Vault/releases/latest/download/latest.json"
-      ],
+      "endpoints": [],
       "windows": {
         "installMode": "passive"
       }
