@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: chatvault-${{ github.workflow }}-${{ github.event_name }}-${{ github.sha }}
-  cancel-in-progress: false
+  group: chatvault-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-and-test:
@@ -64,7 +64,7 @@ jobs:
   deploy-github:
     name: Deploy to GitHub
     needs: build-and-test
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: linux-amd64
 
     steps:
