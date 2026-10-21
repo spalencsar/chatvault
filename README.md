@@ -124,7 +124,19 @@ npx tauri dev
 
 ## Install
 
-After building the production binary, run:
+Prebuilt x86_64 Linux packages are available from the
+[latest GitHub release](https://github.com/spalencsar/chatvault/releases/latest):
+
+```bash
+# Debian or Ubuntu
+sudo apt install ./ChatVault_0.6.0_amd64.deb
+
+# Distribution-independent AppImage
+chmod +x ChatVault_0.6.0_amd64.AppImage
+./ChatVault_0.6.0_amd64.AppImage
+```
+
+When building from source instead, run:
 
 ```bash
 ./scripts/install.sh

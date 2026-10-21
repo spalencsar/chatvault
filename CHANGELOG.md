@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+No unreleased changes.
+
+## 0.6.0 - 2026-10-21
+
 ### Changed
 
 - Reworked the public documentation to present ChatVault as an independent,
@@ -14,6 +18,8 @@
   native test/build job but are still mirrored to GitHub
 - Forgejo Actions now test and build code changes before mirroring all branches
   and tags from `main` to the public GitHub repository
+- Added downloadable Debian and AppImage packages for the first independent
+  Linux release
 
 ### Removed
 
