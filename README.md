@@ -104,6 +104,12 @@ Das legt an:
 
 Start: Befehl `chatvault` oder der Eintrag **ChatVault** im Starter.
 
+## CI
+
+Forgejo baut und testet. Ist `main` grün, geht ein `--mirror` (Branches und Tags) nach GitHub. Entwicklung nur auf Forgejo; GitHub ist der öffentliche Spiegel.
+
+Voraussetzung für den Spiegel: leeres Repo `spalencsar/chatvault` auf GitHub und Forgejo-Secret `DEPLOY_KEY` (Deploy-Key mit Schreibrecht).
+
 ## Datenschutz
 
 ChatVault liest lokale Dateien und schreibt in `~/.local/share/chatvault` plus den optionalen Backup-Ordner. Es lädt keine Chats hoch. Der Upstream-Auto-Updater (GitHub) ist in diesem Fork abgeschaltet.

@@ -27,6 +27,12 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib
 
 Ein Test liest echte Chat-Ordner auf dem Rechner und erwartet Claude-Chats; der kann hier fehlschlagen.
 
+## CI und Spiegel
+
+Forgejo Actions baut und testet PRs, manuelle Läufe und Pushes auf `main`.
+Ein grüner Push auf `main` spiegelt Branches und Tags per `git push --mirror`
+nach GitHub (`spalencsar/chatvault`). Nicht direkt auf den Spiegel pushen.
+
 ## Hinweise
 
 - Login-Shell bleibt bash. Fish nur in Alacritty, falls so konfiguriert.

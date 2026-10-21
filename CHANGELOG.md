@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Forgejo Actions: Build, Test, Production-Binary; grünes `main` spiegelt Branches und Tags nach GitHub (`git push --mirror`)
+
 ## 0.5.0-linux
 
 Linux-Port auf Basis von ChatVault 0.5.0 (upstream: [ssanaullahrais/Chat-Vault](https://github.com/ssanaullahrais/Chat-Vault)).

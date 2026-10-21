@@ -1,0 +1,113 @@
+name: Build, test and deploy
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: chatvault-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: linux-amd64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Reject local agent files
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -Eiq '(^|/)(agents|memory)\.md$'; then
+            echo 'Tracked AGENTS.md or MEMORY.md is not allowed.' >&2
+            exit 1
+          fi
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            pkg-config \
+            wget
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend
+        run: npm ci
+
+      - name: Test
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- --skip indexes_and_reads_real_chats
+
+      - name: Production build
+        run: npx tauri build --no-bundle --ci
+
+  deploy-github:
+    name: Deploy to GitHub
+    needs: build-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: linux-amd64
+
+    steps:
+      - name: Check out tested revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch complete history
+        run: |
+          set -euo pipefail
+          git fetch --prune --tags origin '+refs/heads/*:refs/remotes/origin/*'
+          git fetch --unshallow origin || true
+
+      - name: Configure GitHub SSH key
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_KEY"
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 0600 "$HOME/.ssh/id_ed25519"
+          ssh-keyscan -H -t ed25519 github.com > "$HOME/.ssh/known_hosts"
+          chmod 0644 "$HOME/.ssh/known_hosts"
+
+      - name: Mirror branches and tags to GitHub
+        env:
+          GIT_SSH_COMMAND: ssh -o IdentitiesOnly=yes -o BatchMode=yes
+        run: |
+          set -euo pipefail
+          git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin | while read -r b; do
+            case "$b" in HEAD|main) continue ;; esac
+            git branch -f "$b" "origin/$b"
+          done
+          tmp=$(mktemp -d)
+          git clone --bare "$PWD" "$tmp/chatvault.git"
+          git -C "$tmp/chatvault.git" for-each-ref --format='%(refname)' refs/remotes | while read -r r; do
+            git -C "$tmp/chatvault.git" update-ref -d "$r"
+          done
+          git -C "$tmp/chatvault.git" remote remove origin || true
+          git -C "$tmp/chatvault.git" remote add github git@github.com:spalencsar/chatvault.git
+          git -C "$tmp/chatvault.git" push --mirror github
