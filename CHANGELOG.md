@@ -2,12 +2,24 @@
 
 ## Unreleased
 
-- Forgejo Actions: build, test, and production binary; a green `main` mirrors
-  branches and tags to GitHub (`git push --mirror`)
-- Documentation translated to English
-- Updated the frontend build toolchain and UI dependencies
-- Removed obsolete GitHub-only dependency and Windows release automation; GitHub
-  remains the public mirror
+### Changed
+
+- Reworked the public documentation to present ChatVault as an independent,
+  Linux-focused continuation with clearer feature, privacy, build, installation,
+  and project-lineage information
+- Updated Lucide React to 1.61.0, Recharts to 3.10.1, TypeScript to 7.0.2, and
+  Vite to 8.3.5
+- Replaced the legacy `__dirname` Vite alias with an ESM-compatible file URL
+- Added Forgejo change classification: documentation-only changes skip the
+  native test/build job but are still mirrored to GitHub
+- Forgejo Actions now test and build code changes before mirroring all branches
+  and tags from `main` to the public GitHub repository
+
+### Removed
+
+- Removed obsolete GitHub Dependabot configuration and the Windows-only GitHub
+  release workflow; Forgejo remains the source of truth and GitHub the public
+  mirror
 
 ## 0.5.0-linux
 
