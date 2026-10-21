@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: chatvault-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: chatvault-${{ github.workflow }}-${{ github.event_name }}-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
   build-and-test:
