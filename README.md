@@ -76,7 +76,7 @@ without requiring an account or sending chat content to a remote service.
 | NousSave imports | `~/Documents/ChatVault Import` |
 
 The local search index and managed imports are stored in
-`~/.local/share/chatvault`.
+`~/.local/share/chatvault`. Sources can be enabled individually in Settings.
 
 ## Privacy
 
