@@ -8,8 +8,8 @@ This tree is a derivative of ChatVault by Sanaullah Rais:
 Original work is licensed under the MIT License. The original copyright
 notice is in LICENSE.
 
-Linux port (XDG paths, Wayland/GTK, gio trash), Grok session adapter, and
-NousSave import were added in this repository.
+Linux integration work (XDG paths, Wayland/GTK, gio trash), the Grok session
+adapter, and NousSave import were added in this repository.
 
 Copyright (c) 2026 Sanaullah Rais
 Copyright (c) 2026 Sebastian Palencsar

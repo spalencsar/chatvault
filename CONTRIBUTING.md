@@ -1,6 +1,6 @@
 # Contributing
 
-This repository is the Linux port of ChatVault. Upstream (Windows) is
+This repository is a Linux-focused continuation of ChatVault, derived from
 https://github.com/ssanaullahrais/Chat-Vault.
 
 ## Setup

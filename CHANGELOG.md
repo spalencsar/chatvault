@@ -8,7 +8,7 @@
 
 ## 0.5.0-linux
 
-Linux port based on ChatVault 0.5.0 (upstream:
+Linux-focused release based on ChatVault 0.5.0 (original project:
 [ssanaullahrais/Chat-Vault](https://github.com/ssanaullahrais/Chat-Vault)).
 
 - Linux and Wayland paths (`HOME`, XDG); recycle via `gio trash`
