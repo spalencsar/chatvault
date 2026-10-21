@@ -5,6 +5,9 @@
 - Forgejo Actions: build, test, and production binary; a green `main` mirrors
   branches and tags to GitHub (`git push --mirror`)
 - Documentation translated to English
+- Updated the frontend build toolchain and UI dependencies
+- Removed obsolete GitHub-only dependency and Windows release automation; GitHub
+  remains the public mirror
 
 ## 0.5.0-linux
 
