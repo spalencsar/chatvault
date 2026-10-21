@@ -76,7 +76,7 @@ jobs:
           requires_build=false
           for path in "${changed_files[@]}"; do
             case "$path" in
-              *.md|*.mdx|LICENSE|LICENSE.*|docs/*)
+              *.md|*.mdx|LICENSE|LICENSE.*|NOTICE|NOTICE.*|docs/*)
                 ;;
               *)
                 requires_build=true

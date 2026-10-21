@@ -35,8 +35,8 @@ Forgejo Actions builds and tests pull requests, manual runs, and pushes to
 (`spalencsar/chatvault`) with `git push --mirror`. Do not push the public
 mirror directly.
 
-Documentation-only changes (`*.md`, `*.mdx`, `LICENSE*`, and `docs/**`) skip
-the build and tests but are still mirrored to GitHub.
+Documentation-only changes (`*.md`, `*.mdx`, `LICENSE*`, `NOTICE*`, and
+`docs/**`) skip the build and tests but are still mirrored to GitHub.
 
 ## Notes
 
