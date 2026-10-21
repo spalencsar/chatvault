@@ -12,13 +12,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-test:
-    name: Build and test
+  classify_changes:
+    name: Classify changes
     runs-on: linux-amd64
+    outputs:
+      requires_build: ${{ steps.changes.outputs.requires_build }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Reject local agent files
         run: |
@@ -27,6 +31,76 @@ jobs:
             echo 'Tracked AGENTS.md or MEMORY.md is not allowed.' >&2
             exit 1
           fi
+
+      - name: Detect build-relevant changes
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo 'Manual run: full build required.'
+            echo 'requires_build=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="$BASE_SHA"
+          else
+            base="$BEFORE_SHA"
+          fi
+
+          if [ -z "$base" ] ||
+             printf '%s' "$base" | grep -Eq '^0+$' ||
+             ! git cat-file -e "$base^{commit}" 2>/dev/null ||
+             ! git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then
+            echo 'The complete comparison range is unavailable: full build required.'
+            echo 'requires_build=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          mapfile -t changed_files < <(git diff --name-only "$base" "$HEAD_SHA")
+          printf 'Changed files:\n'
+          printf '  %s\n' "${changed_files[@]}"
+
+          if [ "${#changed_files[@]}" -eq 0 ]; then
+            echo 'No changed files detected: full build required.'
+            echo 'requires_build=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          requires_build=false
+          for path in "${changed_files[@]}"; do
+            case "$path" in
+              *.md|*.mdx|LICENSE|LICENSE.*|docs/*)
+                ;;
+              *)
+                requires_build=true
+                break
+                ;;
+            esac
+          done
+
+          echo "requires_build=$requires_build" >> "$GITHUB_OUTPUT"
+          if [ "$requires_build" = "true" ]; then
+            echo 'Build-relevant changes detected.'
+          else
+            echo 'Documentation-only change: build and tests will be skipped.'
+          fi
+
+  build_and_test:
+    name: Build and test
+    needs: classify_changes
+    if: needs.classify_changes.outputs.requires_build == 'true'
+    runs-on: linux-amd64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
 
       - name: Install build dependencies
         run: |
@@ -61,10 +135,17 @@ jobs:
       - name: Production build
         run: npx tauri build --no-bundle --ci
 
-  deploy-github:
+  deploy_github:
     name: Deploy to GitHub
-    needs: build-and-test
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs:
+      - classify_changes
+      - build_and_test
+    if: >-
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      needs.classify_changes.result == 'success' &&
+      (needs.build_and_test.result == 'success' || needs.build_and_test.result == 'skipped')
     runs-on: linux-amd64
 
     steps:
