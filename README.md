@@ -2,37 +2,43 @@
 
 <img src="app-icon.png" alt="ChatVault" width="96" height="96" />
 
-# ChatVault (Linux)
+# ChatVault
 
-Lokales Dashboard für AI-Chats auf dem eigenen Rechner. Liest, durchsucht und sichert Gespräche von CLI-Tools und importiert Web-Exports (NousSave).
+A local dashboard for AI coding chats on Linux. Search, read, export, and continue conversations from the tools already on this machine, and import browser exports from NousSave.
 
-Claude Code · Codex · Cursor · Grok · Gemini CLI · OpenCode · Cline · importierte Web-Chats
+Claude Code · Codex · Cursor · Grok · Gemini CLI · OpenCode · Cline · imported web chats
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB?style=flat-square)](https://tauri.app)
-[![Platform](https://img.shields.io/badge/platform-Linux-FCC624?style=flat-square)](#bauen)
+[![Platform](https://img.shields.io/badge/platform-Linux-FCC624?style=flat-square)](#build)
 
 </div>
 
-Dieses Repository ist ein **Linux-Port** von [ssanaullahrais/Chat-Vault](https://github.com/ssanaullahrais/Chat-Vault) (MIT). Upstream ist Windows. Hier: Linux/Wayland, Grok-Sessions, NousSave-Import.
+This repository is a Linux port of [ssanaullahrais/Chat-Vault](https://github.com/ssanaullahrais/Chat-Vault) (MIT). The upstream project targets Windows. This tree adds Linux/Wayland paths, Grok sessions, and NousSave import.
 
 <p align="center">
-  <img src="docs/screenshots/01-home.png" alt="ChatVault Startseite" width="900" />
+  <img src="docs/screenshots/01-home.png" alt="ChatVault home: activity, storage, and recent chats" width="900" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/02-chat.png" alt="A chat open in ChatVault" width="900" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/03-search-all-tools.png" alt="Search across every connected tool" width="900" />
 </p>
 
 ---
 
-## Was die App tut
+## Overview
 
-ChatVault findet die Chat-Dateien, die die Tools schon auf der Platte haben, listet sie in einem Fenster und lässt sie lesen, durchsuchen, als Markdown/HTML/JSON speichern und in ein anderes Tool weitergeben (Handoff).
+ChatVault indexes chat files that CLI tools already store on disk. It lists them in one window, supports full-text search, export to Markdown, HTML, text, or JSON, and handoff so work can continue in another tool.
 
-Zusätzlich importiert es **NousSave**-Exports aus dem Browser (ChatGPT, Gemini, Grok und andere Web-UIs).
+It also imports **NousSave** JSON and Markdown exports from web UIs such as ChatGPT, Gemini, and Grok.
 
-Es läuft lokal. Chats gehen nicht in die Cloud. Es braucht kein Konto.
+The application is local. It does not upload chats and does not require an account.
 
-## Quellen
+## Data sources
 
-| Quelle | Ort (typisch) |
+| Source | Typical location |
 | --- | --- |
 | Claude Code | `~/.claude/projects` |
 | Codex | `~/.codex/sessions` |
@@ -41,90 +47,90 @@ Es läuft lokal. Chats gehen nicht in die Cloud. Es braucht kein Konto.
 | Gemini CLI | `~/.gemini/tmp` |
 | OpenCode | `~/.local/share/opencode/opencode.db` |
 | Cline | `~/.cline/data/sessions` |
-| NousSave (Import) | Ablage: `~/Documents/ChatVault Import` |
+| NousSave import | `~/Documents/ChatVault Import` |
 
-Index und Kopien der Imports: `~/.local/share/chatvault`.
+The search index and imported copies live under `~/.local/share/chatvault`.
 
-## NousSave importieren
+## Importing NousSave chats
 
-1. JSON (bevorzugt) oder Markdown mit YAML-`platform` nach `~/Documents/ChatVault Import` legen, in der App scannen.
-2. Oder Settings → **Imported** → Import files / Import folder.
-3. Oder Strg+K → „Import NousSave chats“.
+1. Place JSON (preferred) or Markdown with YAML `platform` in `~/Documents/ChatVault Import`, then scan in the app.
+2. Settings → **Imported** → Import files or Import folder.
+3. `Ctrl`+`K` → **Import NousSave chats**.
 
-ChatGPT, Gemini und Grok bleiben unter **Imported**, getrennt nach Plattform (Dropdown und Gruppen in der Liste). Duplikate werden übersprungen.
+Imported conversations stay under **Imported**, grouped by platform (ChatGPT, Gemini, Grok, and others). Duplicates are skipped.
 
-## Tastatur
+## Keyboard shortcuts
 
-| Tasten | Aktion |
+| Keys | Action |
 | --- | --- |
-| `Strg` + `K` | Suche und Aktionen |
-| `Strg` + `F` | Im offenen Chat suchen |
-| `Esc` | Suche schließen |
+| `Ctrl`+`K` | Command palette and search |
+| `Ctrl`+`F` | Find in the open chat |
+| `Esc` | Close search |
 
-## Voraussetzungen
+## Requirements
 
-- Linux (getestet auf Omarchy / Arch, Hyprland, Wayland)
-- Node 20+
-- Rust (rustup)
-- WebKitGTK und die üblichen Tauri-Linux-Abhängigkeiten, z. B. unter Arch: `webkit2gtk-4.1`, `librsvg`, `openssl`
+- Linux (tested on Omarchy / Arch, Hyprland, Wayland)
+- Node.js 20 or newer
+- Rust via rustup
+- WebKitGTK and other Tauri Linux libraries, for example on Arch: `webkit2gtk-4.1`, `librsvg`, `openssl`
 
-## Bauen
+## Build
 
 ```bash
-git clone <dieses-repo>
-cd chat-vault
+git clone https://github.com/spalencsar/chatvault.git
+cd chatvault
 npm install
 source "$HOME/.cargo/env"
 npx tauri build --no-bundle --ci
 ```
 
-Das Binary liegt in `src-tauri/target/release/chatvault`.
+The binary is written to `src-tauri/target/release/chatvault`.
 
-**Nicht** `cargo build --release` allein verwenden. Ohne `npx tauri build` fehlt das Frontend; die App versucht dann `http://localhost:1420` und bricht mit Connection refused ab.
+Production builds must go through the Tauri CLI so the frontend is embedded. A plain `cargo build --release` loads `http://localhost:1420` and fails unless the Vite dev server is running.
 
-Entwicklung mit Hot-Reload:
+Development with hot reload:
 
 ```bash
 npx tauri dev
 ```
 
-## Installieren
+## Install
 
-Nach dem Production-Build:
+After a production build:
 
 ```bash
 ./scripts/install.sh
 ```
 
-Das legt an:
+This installs:
 
 - `~/.local/bin/chatvault`
 - `~/.local/share/applications/chatvault.desktop`
-- Icon unter `~/.local/share/icons/hicolor/128x128/apps/chatvault.png`
+- `~/.local/share/icons/hicolor/128x128/apps/chatvault.png`
 
-Start: Befehl `chatvault` oder der Eintrag **ChatVault** im Starter.
+Launch with `chatvault` or the **ChatVault** desktop entry. `~/.local/bin` must be on `PATH`.
 
-## CI
+## Continuous integration
 
-Forgejo baut und testet. Ist `main` grün, geht ein `--mirror` (Branches und Tags) nach GitHub. Entwicklung nur auf Forgejo; GitHub ist der öffentliche Spiegel.
+Forgejo Actions builds and tests each change. A successful push to `main` mirrors branches and tags to GitHub with `git push --mirror`. Development happens on Forgejo; GitHub is the public mirror.
 
-Voraussetzung für den Spiegel: leeres Repo `spalencsar/chatvault` auf GitHub und Forgejo-Secret `DEPLOY_KEY` (Deploy-Key mit Schreibrecht).
+The mirror job needs a GitHub repository `spalencsar/chatvault` and a Forgejo secret `DEPLOY_KEY` (a deploy key with write access).
 
-## Datenschutz
+## Privacy
 
-ChatVault liest lokale Dateien und schreibt in `~/.local/share/chatvault` plus den optionalen Backup-Ordner. Es lädt keine Chats hoch. Der Upstream-Auto-Updater (GitHub) ist in diesem Fork abgeschaltet.
+ChatVault reads local chat files and writes to `~/.local/share/chatvault` and an optional backup folder. Chat content is not uploaded. The upstream GitHub auto-updater is disabled in this port.
 
-## Unterschied zu Upstream
+## Differences from upstream
 
-- Linux-Pfade (`HOME` / XDG) statt Windows-`APPDATA`
-- Papierkorb über `gio trash`
-- Grok-CLI-Sessions
-- NousSave JSON/MD-Import
-- Linux-Bundles in der Tauri-Config (`appimage`, `deb`) neben den Windows-Targets
-- Kein automatisches Update von GitHub-Windows-Releases
+- Linux paths (`HOME` / XDG) instead of Windows `%APPDATA%`
+- Recycle via `gio trash`
+- Grok CLI sessions
+- NousSave JSON and Markdown import
+- Linux bundle targets (`appimage`, `deb`) in addition to Windows
+- No automatic updates from upstream Windows releases
 
-## Lizenz
+## License
 
-[MIT](LICENSE) © Sanaullah Rais. Linux-Port und lokale Adapter © Sebastian Palencsar. Siehe [NOTICE](NOTICE).
+[MIT](LICENSE) © Sanaullah Rais. Linux port and local adapters © Sebastian Palencsar. See [NOTICE](NOTICE).
 
-ChatVault ist unabhängig und nicht mit Anthropic, OpenAI, Google, xAI oder Anysphere verbunden.
+ChatVault is an independent project and is not affiliated with Anthropic, OpenAI, Google, xAI, or Anysphere.
