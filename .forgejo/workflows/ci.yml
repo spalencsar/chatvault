@@ -64,7 +64,7 @@ jobs:
   deploy-github:
     name: Deploy to GitHub
     needs: build-and-test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: linux-amd64
 
     steps:
