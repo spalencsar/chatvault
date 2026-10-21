@@ -1,11 +1,11 @@
-# Mitwirken
+# Contributing
 
-Dieses Repository ist der Linux-Port. Upstream (Windows) liegt unter
+This repository is the Linux port of ChatVault. Upstream (Windows) is
 https://github.com/ssanaullahrais/Chat-Vault.
 
 ## Setup
 
-Siehe [README](README.md#bauen). Kurz:
+See the [README](README.md#build). In short:
 
 ```bash
 npm install
@@ -13,7 +13,7 @@ source "$HOME/.cargo/env"
 npx tauri dev
 ```
 
-Production-Binary nur mit:
+Production binary:
 
 ```bash
 npx tauri build --no-bundle --ci
@@ -25,16 +25,17 @@ npx tauri build --no-bundle --ci
 cargo test --manifest-path src-tauri/Cargo.toml --lib
 ```
 
-Ein Test liest echte Chat-Ordner auf dem Rechner und erwartet Claude-Chats; der kann hier fehlschlagen.
+`indexes_and_reads_real_chats` reads chat folders on the host and expects
+Claude, Codex, and Cursor data. It is skipped in CI.
 
-## CI und Spiegel
+## Continuous integration
 
-Forgejo Actions baut und testet PRs, manuelle Läufe und Pushes auf `main`.
-Ein grüner Push auf `main` spiegelt Branches und Tags per `git push --mirror`
-nach GitHub (`spalencsar/chatvault`). Nicht direkt auf den Spiegel pushen.
+Forgejo Actions builds and tests pull requests, manual runs, and pushes to
+`main`. A successful push to `main` mirrors branches and tags to GitHub
+(`spalencsar/chatvault`) with `git push --mirror`. Do not push the public
+mirror directly.
 
-## Hinweise
+## Notes
 
-- Login-Shell bleibt bash. Fish nur in Alacritty, falls so konfiguriert.
-- Keine Secrets, Tokens oder echte Chat-Exports committen.
-- UI der App ist Englisch; Doku hier auf Deutsch.
+- Do not commit secrets, tokens, or real chat exports.
+- The application UI and documentation are English.

@@ -2,16 +2,19 @@
 
 ## Unreleased
 
-- Forgejo Actions: Build, Test, Production-Binary; grünes `main` spiegelt Branches und Tags nach GitHub (`git push --mirror`)
+- Forgejo Actions: build, test, and production binary; a green `main` mirrors
+  branches and tags to GitHub (`git push --mirror`)
+- Documentation translated to English
 
 ## 0.5.0-linux
 
-Linux-Port auf Basis von ChatVault 0.5.0 (upstream: [ssanaullahrais/Chat-Vault](https://github.com/ssanaullahrais/Chat-Vault)).
+Linux port based on ChatVault 0.5.0 (upstream:
+[ssanaullahrais/Chat-Vault](https://github.com/ssanaullahrais/Chat-Vault)).
 
-- Linux- und Wayland-Pfade (`HOME`, XDG), Papierkorb mit `gio trash`
-- Grok-Sessions aus `~/.grok/sessions`
-- NousSave-Import (JSON bevorzugt, Markdown mit `platform` in der YAML-Frontmatter)
-- Ablageordner `~/Documents/ChatVault Import`; Kopien unter `~/.local/share/chatvault/imported`
-- Importierte Chats nach Plattform gruppiert (ChatGPT, Gemini, Grok, …)
-- Production-Start ohne Vite-Devserver (`npx tauri build`)
-- Auto-Updater gegen GitHub-Windows-Releases abgeschaltet
+- Linux and Wayland paths (`HOME`, XDG); recycle via `gio trash`
+- Grok sessions from `~/.grok/sessions`
+- NousSave import (JSON preferred; Markdown with `platform` in the YAML front matter)
+- Drop folder `~/Documents/ChatVault Import`; copies under `~/.local/share/chatvault/imported`
+- Imported chats grouped by platform (ChatGPT, Gemini, Grok, and others)
+- Production launch without the Vite dev server (`npx tauri build`)
+- Auto-updater against GitHub Windows releases disabled
