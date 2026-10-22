@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Archive, Clock, FolderOpen, Pin } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { ProviderLogo } from "@/claude-logo";
+import { ProviderLogo, visualProvider } from "@/claude-logo";
 import { ContextArea, type Entry } from "@/context-area";
 import { accountLabel, fmtDate, prettyProject, prettyTitle, type Chat } from "@/chat-actions";
 
@@ -37,6 +37,7 @@ export function ChatCard({
   onOpen: () => void;
   onUnpin?: () => void;
 }) {
+  const logoProvider = visualProvider(chat.provider, chat.account);
   const card = (
     <div
       role="button"
@@ -47,7 +48,7 @@ export function ChatCard({
     >
       <div className="flex items-start gap-2.5">
         <div className={cn("relative mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted group-hover:bg-white dark:group-hover:bg-white/10", selected && "bg-white dark:bg-white/10")}>
-          <ProviderLogo provider={chat.provider} className="size-5" />
+          <ProviderLogo provider={logoProvider} className="size-5" />
           {live && (
             <span className="absolute -right-1 -top-1 flex size-2" aria-label="An agent is working in this chat">
               <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400 opacity-75" />

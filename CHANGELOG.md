@@ -6,6 +6,9 @@
 
 - Added support for NousSave schema v2 `vines-full-capsule` JSON exports,
   including one managed import per conversation in multi-vine capsules
+- Restored images embedded by NousSave in `htmlContent` instead of leaving
+  `[Image: image omitted …]` placeholders in imported conversations
+- Show native Grok and Gemini icons for imported chats from those platforms
 - Prevented the automatic drop-folder scan from repeatedly parsing unchanged
   large exports, which could make the app appear unresponsive
 

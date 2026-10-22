@@ -9,6 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const MAX_BYTES: u64 = 50_000_000;
+const MAX_EMBEDDED_IMAGE_BYTES: usize = 4_000_000;
 const INBOX_CACHE_VERSION: &str = "2";
 
 #[derive(Serialize, Default, Debug)]
@@ -200,6 +201,37 @@ fn flatten_text(v: &Value) -> String {
     }
 }
 
+/// NousSave keeps screenshots in `htmlContent` even when `contentText` only
+/// contains an "image omitted" marker. Return safe, viewer-ready data URLs.
+fn embedded_images(html: &str) -> Vec<&str> {
+    let mut images = Vec::new();
+    let mut rest = html;
+    while let Some(start) = rest.find("src=") {
+        rest = &rest[start + 4..];
+        let Some(quote @ ('\'' | '"')) = rest.chars().next() else {
+            continue;
+        };
+        rest = &rest[quote.len_utf8()..];
+        let Some(end) = rest.find(quote) else { break };
+        let src = &rest[..end];
+        if src.starts_with("data:image/") && src.len() <= MAX_EMBEDDED_IMAGE_BYTES {
+            images.push(src);
+        }
+        rest = &rest[end + quote.len_utf8()..];
+    }
+    images
+}
+
+fn remove_omitted_image_markers(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            let line = line.trim();
+            !(line.starts_with("[Image: image omitted") && line.ends_with(']'))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn role_of(s: &str) -> Option<&'static str> {
     match s.trim().to_ascii_lowercase().as_str() {
         "user" | "human" | "you" => Some("user"),
@@ -236,11 +268,19 @@ fn push_json_msg(out: &mut Vec<Msg>, m: &Value) {
             "reasoning",
         ));
     }
+    if let Some(html) = m.get("htmlContent").and_then(Value::as_str) {
+        for src in embedded_images(html) {
+            let mut image = Msg::new(role, ts, "[Image]".into(), "image");
+            image.data = Some(Value::String(src.to_string()));
+            out.push(image);
+        }
+    }
     let mut text = flatten_text(
         m.get("content")
             .or_else(|| m.get("contentText"))
             .unwrap_or(&Value::Null),
     );
+    text = remove_omitted_image_markers(&text);
     if text.trim().is_empty() {
         if let Some(html) = m
             .get("html")
@@ -792,7 +832,12 @@ mod tests {
                 "firstSeenAt": "2026-10-20T10:00:00Z",
                 "lastSeenAt": "2026-10-20T10:01:00Z",
                 "messages": [
-                    { "role": "user", "capturedAt": "2026-10-20T10:00:00Z", "contentText": "Question" },
+                    {
+                        "role": "user",
+                        "capturedAt": "2026-10-20T10:00:00Z",
+                        "contentText": "[Image: image omitted]\nQuestion",
+                        "htmlContent": "<p><img src=\"data:image/png;base64,aGVsbG8=\"></p>"
+                    },
                     { "role": "assistant", "capturedAt": "2026-10-20T10:01:00Z", "contentText": "Answer", "thinking": "Check it" }
                 ]
             })
@@ -816,10 +861,15 @@ mod tests {
         assert_eq!(parsed.title, "First chat");
         assert_eq!(parsed.platform, "ChatGPT");
         assert_eq!(parsed.model.as_deref(), Some("GPT-6"));
-        assert_eq!(parsed.messages.len(), 3);
-        assert_eq!(parsed.messages[0].text, "Question");
-        assert_eq!(parsed.messages[1].kind, "reasoning");
-        assert_eq!(parsed.messages[2].text, "Answer");
+        assert_eq!(parsed.messages.len(), 4);
+        assert_eq!(parsed.messages[0].kind, "image");
+        assert_eq!(
+            parsed.messages[0].data.as_ref().and_then(Value::as_str),
+            Some("data:image/png;base64,aGVsbG8=")
+        );
+        assert_eq!(parsed.messages[1].text, "Question");
+        assert_eq!(parsed.messages[2].kind, "reasoning");
+        assert_eq!(parsed.messages[3].text, "Answer");
         assert_eq!(parsed.created_ms, ms_of("2026-10-20T10:00:00Z"));
         assert_eq!(parsed.last_ms, ms_of("2026-10-20T10:01:00Z"));
     }
@@ -886,6 +936,17 @@ mod tests {
                 .iter()
                 .any(|message| message.role == "assistant")
         );
+        let images: Vec<&Msg> = parsed
+            .messages
+            .iter()
+            .filter(|message| message.kind == "image")
+            .collect();
+        assert!(images.len() >= 30);
+        assert!(images.iter().all(|message| message
+            .data
+            .as_ref()
+            .and_then(Value::as_str)
+            .is_some_and(|src| src.starts_with("data:image/"))));
     }
 
     #[test]

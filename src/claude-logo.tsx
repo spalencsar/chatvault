@@ -195,6 +195,15 @@ export function ProviderLogo({ provider, className }: { provider: Provider; clas
   return <ClineLogo className={className} />;
 }
 
+/** Use the original platform mark for imported chats when ChatVault has one. */
+export function visualProvider(provider: Provider, account?: string): Provider {
+  if (provider !== "imported") return provider;
+  const platform = account?.trim().toLowerCase();
+  if (platform === "grok" || platform === "xai" || platform === "x.ai") return "grok";
+  if (platform === "gemini" || platform === "google gemini") return "gemini";
+  return "imported";
+}
+
 /** The GitHub mark. */
 export function GithubIcon({ className }: { className?: string }) {
   return (

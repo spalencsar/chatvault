@@ -49,7 +49,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { cn } from "@/lib/utils";
 import type { LucideIcon } from "lucide-react";
 import { ContextArea, type Entry } from "@/context-area";
-import { AppLogo, ProviderLogo, ProviderStack } from "@/claude-logo";
+import { AppLogo, ProviderLogo, ProviderStack, visualProvider } from "@/claude-logo";
 import { Badge } from "@/components/ui/badge";
 import { ActionIcon } from "@/action-icon";
 import { ChatCard } from "@/chat-card";
@@ -958,7 +958,11 @@ export default function App() {
               {provider !== "all" && (
               <Select open={accountOpen} onOpenChange={setAccountOpen} value={account} onValueChange={(v) => v && setAccounts((a) => ({ ...a, [provider]: v }))} items={accountItems}>
                 <SelectTrigger className="h-9 w-full">
-                  <Users className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} />
+                  {provider === "imported" && account !== "all" ? (
+                    <ProviderLogo provider={visualProvider("imported", account)} className="size-4 shrink-0" />
+                  ) : (
+                    <Users className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} />
+                  )}
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent alignItemWithTrigger={false} align="end" sideOffset={6} className="w-72">
@@ -988,6 +992,9 @@ export default function App() {
                         ) : undefined
                       }
                     >
+                      {provider === "imported" && id !== "all" && (
+                        <ProviderLogo provider={visualProvider("imported", id)} className="size-4 shrink-0" />
+                      )}
                       {/* A long name is cut with "…" and shown in full on hover, so the tick and the pencil always stay in view. */}
                       <span className="block max-w-[13.5rem] truncate" title={label}>
                         {label}

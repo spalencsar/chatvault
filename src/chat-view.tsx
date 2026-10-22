@@ -62,7 +62,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
-import { ProviderLogo } from "@/claude-logo";
+import { ProviderLogo, visualProvider } from "@/claude-logo";
 import { MessageBody } from "@/message-body";
 import { Highlight, textHas } from "@/highlight";
 import { PROVIDER_SHORT, chatActions, continueTargets, COPY_CONTENT_IDS, deleteKind, fmtDate, fmtSize, prettyTitle, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
@@ -107,6 +107,7 @@ type Block = { kind: "msg"; i: number; m: Item } | { kind: "plan"; i: number; m:
 
 export function ChatView(p: Props) {
   const { chat, page } = p;
+  const logoProvider = visualProvider(chat.provider, chat.account);
   const [searchOpen, setSearchOpen] = useState(false);
   const [q, setQ] = useState("");
   const [cur, setCur] = useState(0);
@@ -668,7 +669,7 @@ export function ChatView(p: Props) {
                       ) : b.kind === "trace" ? (
                         <StepsTrace items={b.items} q={query} rowKey={String(vi.key)} />
                       ) : (
-                        <MessageRow m={b.m} provider={chat.provider} q={query} isCurrentMatch={matchIndex >= 0 && matches[matchIndex] === b.i} toast={p.toast} rowKey={String(vi.key)} />
+                        <MessageRow m={b.m} provider={logoProvider} q={query} isCurrentMatch={matchIndex >= 0 && matches[matchIndex] === b.i} toast={p.toast} rowKey={String(vi.key)} />
                       )}
                     </div>
                   );
@@ -677,10 +678,10 @@ export function ChatView(p: Props) {
               {p.live && (
                 <div className="flex items-center gap-3 pt-2" aria-live="polite">
                   <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-muted">
-                    <ProviderLogo provider={chat.provider} className="size-5 animate-pulse" />
+                    <ProviderLogo provider={logoProvider} className="size-5 animate-pulse" />
                   </div>
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <span className="animate-pulse">{PROVIDER_SHORT[chat.provider]} is working</span>
+                    <span className="animate-pulse">{PROVIDER_SHORT[logoProvider]} is working</span>
                     <span className="flex gap-[3px]">
                       {[0, 200, 400].map((d) => (
                         <span key={d} className="size-[3px] animate-pulse rounded-full bg-muted-foreground/60" style={{ animationDelay: `${d}ms`, animationDuration: "1.4s" }} />
