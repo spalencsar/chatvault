@@ -130,11 +130,11 @@ Prebuilt x86_64 Linux packages are available from the
 
 ```bash
 # Debian or Ubuntu
-sudo apt install ./ChatVault_0.6.0_amd64.deb
+sudo apt install ./ChatVault_0.6.1_amd64.deb
 
 # Distribution-independent AppImage
-chmod +x ChatVault_0.6.0_amd64.AppImage
-./ChatVault_0.6.0_amd64.AppImage
+chmod +x ChatVault_0.6.1_amd64.AppImage
+./ChatVault_0.6.1_amd64.AppImage
 ```
 
 When building from source instead, run:
