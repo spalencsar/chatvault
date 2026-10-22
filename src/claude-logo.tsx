@@ -163,12 +163,14 @@ export function ProviderStack({ providers, max = 4, className }: { providers: Pr
   );
 }
 
-/** A simple xAI-style X mark that inverts with the theme. */
+/** The official Grok symbol, using the light or dark foreground colour. */
 export function GrokLogo({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 24 24" className={className} aria-hidden>
-      <rect width="24" height="24" rx="5" className="fill-foreground" />
-      <path d="M7 7 L17 17 M17 7 L7 17" className="stroke-background" strokeWidth="2.4" strokeLinecap="round" />
+      <path
+        className="fill-foreground"
+        d="m24 .389-3.3 3.33v-.01L9.27 15.295l7.978-5.943c.391-.292.95-.178 1.137.275.98 2.387.541 5.255-1.41 7.225s-4.667 2.401-7.149 1.418l-2.71 1.267c3.888 2.683 8.61 2.02 11.562-.96 2.34-2.363 3.064-5.583 2.386-8.487l.008.006c-.983-4.266.241-5.97 2.75-9.457zM11.922 3.115A8.93 8.93 0 0 0 5.984 5.76c-2.533 2.556-3.33 6.487-1.963 9.842 1.022 2.507-.652 4.28-2.34 6.07-.597.634-1.198 1.268-1.681 1.94l7.621-6.87.002-.002c-2.791-2.69-2.311-6.856.07-9.258C9.455 5.705 12.34 4.98 14.86 6.047l2.705-1.262a7.8 7.8 0 0 0-1.828-1.006 8.9 8.9 0 0 0-3.814-.664"
+      />
     </svg>
   );
 }
