@@ -9,7 +9,7 @@
 Browse, search, organize, export, back up, and continue conversations created
 by the AI tools already installed on your Linux system.
 
-Claude Code · Codex · Cursor · Grok · Gemini CLI · OpenCode · Cline · imported web chats
+Claude Code · Codex · Cursor · Grok · Hermes Agent · Gemini CLI · OpenCode · Cline · imported web chats
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB?style=flat-square)](https://tauri.app)
@@ -70,6 +70,7 @@ without requiring an account or sending chat content to a remote service.
 | Codex | `~/.codex/sessions` |
 | Cursor | `~/.cursor` |
 | Grok | `~/.grok/sessions` |
+| Hermes Agent | `~/.hermes/state.db` (read-only) |
 | Gemini CLI | `~/.gemini/tmp` |
 | OpenCode | `~/.local/share/opencode/opencode.db` |
 | Cline | `~/.cline/data/sessions` |

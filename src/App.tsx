@@ -120,7 +120,7 @@ export default function App() {
   const [renamingAccount, setRenamingAccount] = useState<string | null>(null);
   const [accountOpen, setAccountOpen] = useState(false);
 
-  const [overview, setOverview] = useState<Record<Provider, Overview | null>>({ claude: null, codex: null, cursor: null, gemini: null, opencode: null, cline: null, grok: null, imported: null });
+  const [overview, setOverview] = useState<Record<Provider, Overview | null>>({ claude: null, codex: null, cursor: null, gemini: null, opencode: null, cline: null, grok: null, hermes: null, imported: null });
   const [accountInfo, setAccountInfo] = useState<AccountInfo[]>([]);
   const account = provider === "all" ? "all" : accounts[provider] ?? "all";
   const [query, setQuery] = useState("");

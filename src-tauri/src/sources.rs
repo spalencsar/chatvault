@@ -148,6 +148,15 @@ pub fn all(count_all: bool) -> Vec<Source> {
     }
     out.push(Source { provider: "grok".into(), name: "Grok".into(), enabled: on("grok"), locations: grok });
 
+    let count = count_all && on("hermes");
+    let found = crate::hermes::database_files();
+    let databases = if found.is_empty() { crate::hermes::database_candidates().into_iter().take(1).collect() } else { found };
+    let hermes = databases.into_iter().map(|db| {
+        let n = if count && db.is_file() { crate::hermes::chat_count(&db) } else { None };
+        file("Database (read-only)", &db, n)
+    }).collect();
+    out.push(Source { provider: "hermes".into(), name: "Hermes Agent".into(), enabled: on("hermes"), locations: hermes });
+
     let count = count_all && on("imported");
     let mut imported = Vec::new();
     if let Some(r) = crate::imported::ensure_inbox() {
@@ -197,7 +206,7 @@ mod tests {
     fn every_tool_is_listed_and_only_listed_places_can_be_opened() {
         let all = all(false);
         let ids: Vec<&str> = all.iter().map(|s| s.provider.as_str()).collect();
-        assert_eq!(ids, ["claude", "codex", "cursor", "gemini", "opencode", "cline", "grok", "imported"]);
+        assert_eq!(ids, ["claude", "codex", "cursor", "gemini", "opencode", "cline", "grok", "hermes", "imported"]);
         assert!(all.iter().all(|s| !s.locations.is_empty()), "each tool shows at least one place");
         assert!(open("C:\\Windows\\System32").is_err(), "an unlisted place is refused");
         assert!(open("/etc").is_err(), "an unlisted place is refused");

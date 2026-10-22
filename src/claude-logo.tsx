@@ -186,6 +186,17 @@ export function ImportedLogo({ className }: { className?: string }) {
   );
 }
 
+/** Hermes Agent mark: a compact monochrome profile inspired by its Nous brand badge. */
+export function HermesLogo({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden fill="none">
+      <rect x="1" y="1" width="22" height="22" rx="5" className="fill-foreground" />
+      <path d="M7 18.5V9.2C7 5.8 9.2 4 12.4 4c3.5 0 5.6 2.1 5.6 5.5v9h-3.1v-4.4H10v4.4H7Zm3-7.1h4.9V9.6c0-1.8-.9-2.8-2.5-2.8S10 7.8 10 9.6v1.8Z" className="fill-background" />
+      <path d="M5.1 8.2c1.4-2.6 3.8-4.3 7-4.3 3.5 0 5.9 1.6 7.2 4.5-1.5-1.4-3.5-2.1-5.8-2.1-3.1 0-5.8.8-8.4 1.9Z" className="fill-amber-400" />
+    </svg>
+  );
+}
+
 export function ProviderLogo({ provider, className }: { provider: Provider; className?: string }) {
   if (provider === "claude") return <ClaudeLogo className={className} />;
   if (provider === "codex") return <CodexLogo className={className} />;
@@ -193,6 +204,7 @@ export function ProviderLogo({ provider, className }: { provider: Provider; clas
   if (provider === "gemini") return <GeminiLogo className={className} />;
   if (provider === "opencode") return <OpenCodeLogo className={className} />;
   if (provider === "grok") return <GrokLogo className={className} />;
+  if (provider === "hermes") return <HermesLogo className={className} />;
   if (provider === "imported") return <ImportedLogo className={className} />;
   return <ClineLogo className={className} />;
 }

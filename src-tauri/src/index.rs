@@ -436,7 +436,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
     }
     let result = (|| {
         let mut c = open_db()?;
-        let source_upgrade = c.query_row("SELECT value FROM source_state WHERE name='local_sources'",[],|r|r.get::<_,String>(0)).ok().as_deref()!=Some("6");
+        let source_upgrade = c.query_row("SELECT value FROM source_state WHERE name='local_sources'",[],|r|r.get::<_,String>(0)).ok().as_deref()!=Some("7");
         // Rows saved with a raw encoded folder name are rebuilt once so they get the readable project name.
         let _ = c.execute("DELETE FROM chats WHERE provider='claude' AND project LIKE 'C--%'", []);
         // Chats without desktop-app records are rebuilt once so they pick up the folder found in the transcript.
@@ -456,7 +456,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
         let native_ids:HashSet<String>=native_chats.iter().map(|ch|ch.id.clone()).collect();
 
         let tx = c.transaction().map_err(|e| e.to_string())?;
-        for (path, _) in known.iter().filter(|(p, _)| !seen.contains(*p) && !p.starts_with("cursor-") && !p.starts_with("codex-db:") && !Path::new(p).exists()) {
+        for (path, _) in known.iter().filter(|(p, _)| !seen.contains(*p) && !p.starts_with("cursor-") && !p.starts_with("codex-db:") && !crate::others::is_virtual(p) && !Path::new(p).exists()) {
             let _ = tx.execute(
                 "DELETE FROM chats_fts WHERE key IN (SELECT provider||':'||id FROM chats WHERE path=?1)",
                 params![path],
@@ -639,7 +639,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
             tx.commit().map_err(|e| e.to_string())?;
         }
         if let Some(a) = app { let _ = a.emit("index-progress", Progress { phase: "Done".into(), done: total, total }); }
-        c.execute("INSERT OR REPLACE INTO source_state(name,value) VALUES('local_sources','6')",[]).map_err(|e|e.to_string())?;
+        c.execute("INSERT OR REPLACE INTO source_state(name,value) VALUES('local_sources','7')",[]).map_err(|e|e.to_string())?;
         Ok(())
     })();
     REFRESHING.store(false, Ordering::SeqCst);

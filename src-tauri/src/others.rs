@@ -10,9 +10,9 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const TOOLS: [&str; 5] = ["gemini", "opencode", "cline", "grok", "imported"];
+pub const TOOLS: [&str; 6] = ["gemini", "opencode", "cline", "grok", "hermes", "imported"];
 /// For SQL `IN (...)` when the index rebuilds these tools together.
-pub const SQL_IN: &str = "'gemini','opencode','cline','grok','imported'";
+pub const SQL_IN: &str = "'gemini','opencode','cline','grok','hermes','imported'";
 
 pub struct OtherChat {
     pub provider: &'static str,
@@ -446,6 +446,7 @@ pub fn scan() -> Vec<OtherChat> {
     scan_opencode(&mut out);
     scan_cline(&mut out);
     crate::grok::scan(&mut out);
+    crate::hermes::scan(&mut out);
     crate::imported::scan(&mut out);
     out
 }
@@ -465,7 +466,7 @@ pub fn fingerprint() -> i64 {
         wal.push("-wal");
         m = m.max(mtime(Path::new(&wal)));
     }
-    m.max(crate::grok::fingerprint()).max(crate::imported::fingerprint())
+    m.max(crate::grok::fingerprint()).max(crate::hermes::fingerprint()).max(crate::imported::fingerprint())
 }
 
 pub fn read(path: &str) -> Result<Vec<Msg>, String> {
@@ -481,6 +482,9 @@ pub fn read(path: &str) -> Result<Vec<Msg>, String> {
     if let Some(p) = path.strip_prefix("grok:") {
         return Ok(crate::grok::messages(Path::new(p)));
     }
+    if path.starts_with("hermes-db:") {
+        return crate::hermes::read(path);
+    }
     if let Some(p) = path.strip_prefix("imported:") {
         return Ok(crate::imported::messages(Path::new(p)));
     }
@@ -488,7 +492,7 @@ pub fn read(path: &str) -> Result<Vec<Msg>, String> {
 }
 
 pub fn is_virtual(path: &str) -> bool {
-    TOOLS.iter().any(|t| path.starts_with(&format!("{t}:")))
+    path.starts_with("hermes-db:") || TOOLS.iter().any(|t| path.starts_with(&format!("{t}:")))
 }
 
 /// What deleting a Gemini or Cline chat removes: only a file or folder that the scan itself lists, so a path
@@ -528,6 +532,9 @@ pub fn real_file(path: &str) -> Option<PathBuf> {
     }
     if path.starts_with("grok:") {
         return crate::grok::real_file(path);
+    }
+    if path.starts_with("hermes-db:") {
+        return crate::hermes::real_file(path);
     }
     if path.starts_with("imported:") {
         return crate::imported::real_file(path);

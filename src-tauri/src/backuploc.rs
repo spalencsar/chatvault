@@ -96,7 +96,7 @@ fn is_empty_dir(dir: &Path) -> bool {
 fn protected() -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = Vec::new();
     if let Some(h) = home() {
-        for d in [".claude", ".codex", ".gemini", ".cursor", ".cline", ".grok", ".local/share/opencode", ".config/opencode"] {
+        for d in [".claude", ".codex", ".gemini", ".cursor", ".cline", ".grok", ".hermes", ".local/share/opencode", ".config/opencode"] {
             v.push(h.join(d));
         }
     }

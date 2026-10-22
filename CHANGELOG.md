@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+- Added read-only support for Hermes Agent sessions from its canonical
+  `~/.hermes/state.db`, including compressed session lineages, search, filters,
+  overview statistics, exports, and source settings
+
 ### Fixed
 
 - Added support for NousSave schema v2 `vines-full-capsule` JSON exports,

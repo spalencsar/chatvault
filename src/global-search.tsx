@@ -11,7 +11,7 @@ import { PROVIDERS, PROVIDER_NAME, PROVIDER_SHORT, fmtDate, type Chat, type Prov
 import { cn } from "@/lib/utils";
 
 type Hit = { chat: Chat; snippet: string };
-const none = (): Record<Provider, Hit[]> => ({ claude: [], codex: [], cursor: [], gemini: [], opencode: [], cline: [], grok: [], imported: [] });
+const none = (): Record<Provider, Hit[]> => ({ claude: [], codex: [], cursor: [], gemini: [], opencode: [], cline: [], grok: [], hermes: [], imported: [] });
 
 const RECENT_KEY = "chatvault.recentSearches";
 const loadRecent = (): string[] => {

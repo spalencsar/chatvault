@@ -31,9 +31,9 @@ const DAYS = 14;
 const CLAUDE = "#D97757";
 const CODEX = "#7a9dff";
 const CURSOR = "#2dd4bf";
-const COLOR: Record<Provider, string> = { claude: CLAUDE, codex: CODEX, cursor: CURSOR, gemini: "#c084fc", opencode: "#a3e635", cline: "#fb7185", grok: "#94a3b8", imported: "#38bdf8" };
+const COLOR: Record<Provider, string> = { claude: CLAUDE, codex: CODEX, cursor: CURSOR, gemini: "#c084fc", opencode: "#a3e635", cline: "#fb7185", grok: "#94a3b8", hermes: "#f59e0b", imported: "#38bdf8" };
 const chartConfig: ChartConfig = Object.fromEntries(PROVIDERS.map((p) => [p, { label: PROVIDER_SHORT[p], color: COLOR[p] }])) as ChartConfig;
-const zero = (): Record<Provider, number> => ({ claude: 0, codex: 0, cursor: 0, gemini: 0, opencode: 0, cline: 0, grok: 0, imported: 0 });
+const zero = (): Record<Provider, number> => ({ claude: 0, codex: 0, cursor: 0, gemini: 0, opencode: 0, cline: 0, grok: 0, hermes: 0, imported: 0 });
 
 /** A tiny line of the last days, so a card shows which way a tool is heading. */
 function Spark({ values, color }: { values: number[]; color: string }) {

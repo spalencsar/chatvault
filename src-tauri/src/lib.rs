@@ -3,6 +3,7 @@ mod cursor;
 mod cli;
 mod codex_db;
 mod grok;
+mod hermes;
 mod imported;
 mod index;
 mod integrations;
@@ -1041,7 +1042,7 @@ struct ExportDone {
     error: Option<String>,
 }
 
-const EXPORT_TOOLS: [(&str, &str); 8] = [("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor"), ("gemini", "Gemini CLI"), ("opencode", "OpenCode"), ("cline", "Cline"), ("grok", "Grok"), ("imported", "Imported")];
+const EXPORT_TOOLS: [(&str, &str); 9] = [("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor"), ("gemini", "Gemini CLI"), ("opencode", "OpenCode"), ("cline", "Cline"), ("grok", "Grok"), ("hermes", "Hermes Agent"), ("imported", "Imported")];
 
 /// Reads one chat and returns its Markdown, or None when it has nothing readable. File names depend only on the chat, so
 /// exporting again to the same folder replaces the earlier files instead of piling up copies.

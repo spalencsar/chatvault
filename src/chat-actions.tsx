@@ -21,10 +21,10 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-export type Provider = "claude" | "codex" | "cursor" | "gemini" | "opencode" | "cline" | "grok" | "imported";
+export type Provider = "claude" | "codex" | "cursor" | "gemini" | "opencode" | "cline" | "grok" | "hermes" | "imported";
 /** What the sidebar lists: one tool, or every tool together. */
 export type Tool = Provider | "all";
-const EVERY_PROVIDER: Provider[] = ["claude", "codex", "cursor", "grok", "gemini", "opencode", "cline", "imported"];
+const EVERY_PROVIDER: Provider[] = ["claude", "codex", "cursor", "grok", "hermes", "gemini", "opencode", "cline", "imported"];
 const EVERY_CORE: Provider[] = ["claude", "codex", "cursor", "grok"];
 /** The tools ChatVault looks at. A tool switched off in Settings is left out, so every list and chart that reads this drops it. */
 export const PROVIDERS: Provider[] = [...EVERY_PROVIDER];
@@ -49,11 +49,11 @@ export const isHandoffOnly = (p: Provider) => p !== "claude" && p !== "codex";
  */
 export type DeleteKind = "trash" | "opencode" | "blocked";
 export const deleteKind = (c: { provider: Provider; path: string }): DeleteKind =>
-  c.provider === "opencode" ? "opencode" : c.path.startsWith("cursor-ide:") || c.path.startsWith("codex-db:") ? "blocked" : "trash";
+  c.provider === "opencode" ? "opencode" : c.path.startsWith("cursor-ide:") || c.path.startsWith("codex-db:") || c.path.startsWith("hermes-db:") ? "blocked" : "trash";
 /** What a click on a grayed Delete tells the user. */
 export const deleteBlockedMessage = (tool: string) =>
   `This chat is stored inside ${tool} itself, so ChatVault can't delete it. Delete it in ${tool}, or use Archive to hide it here.`;
-export const PROVIDER_SHORT: Record<Provider, string> = { claude: "Claude", codex: "Codex", cursor: "Cursor", gemini: "Gemini", opencode: "OpenCode", cline: "Cline", grok: "Grok", imported: "Imported" };
+export const PROVIDER_SHORT: Record<Provider, string> = { claude: "Claude", codex: "Codex", cursor: "Cursor", gemini: "Gemini", opencode: "OpenCode", cline: "Cline", grok: "Grok", hermes: "Hermes", imported: "Imported" };
 
 export type Chat = {
   provider: Provider;
@@ -97,7 +97,7 @@ export type AccountInfo = {
   plan: string | null;
 };
 
-export const PROVIDER_NAME: Record<Provider, string> = { claude: "Claude Code", codex: "Codex", cursor: "Cursor", gemini: "Gemini CLI", opencode: "OpenCode", cline: "Cline", grok: "Grok", imported: "Imported" };
+export const PROVIDER_NAME: Record<Provider, string> = { claude: "Claude Code", codex: "Codex", cursor: "Cursor", gemini: "Gemini CLI", opencode: "OpenCode", cline: "Cline", grok: "Grok", hermes: "Hermes Agent", imported: "Imported" };
 
 export const fmtDate = (ms: number) =>
   new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
