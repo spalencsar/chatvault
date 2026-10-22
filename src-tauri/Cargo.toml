@@ -1,6 +1,6 @@
 [package]
 name = "chatvault"
-version = "0.6.0"
+version = "0.6.1"
 description = "Private, local-first desktop workspace for AI conversation history"
 authors = ["Sebastian Palencsar", "Sanaullah Rais"]
 edition = "2024"

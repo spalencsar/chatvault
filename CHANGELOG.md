@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.1 - 2026-10-22
+
 ### Added
 
 - Added read-only support for Hermes Agent sessions from its canonical
@@ -19,6 +21,8 @@
   repository while retaining the original project attribution in the docs
 - Prevented the automatic drop-folder scan from repeatedly parsing unchanged
   large exports, which could make the app appear unresponsive
+- Removed three stale Rust compiler warnings from the index, source, and Cursor
+  integration code
 
 ## 0.6.0 - 2026-10-21
 
