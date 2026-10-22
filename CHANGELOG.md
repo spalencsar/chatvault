@@ -2,7 +2,12 @@
 
 ## Unreleased
 
-No unreleased changes.
+### Fixed
+
+- Added support for NousSave schema v2 `vines-full-capsule` JSON exports,
+  including one managed import per conversation in multi-vine capsules
+- Prevented the automatic drop-folder scan from repeatedly parsing unchanged
+  large exports, which could make the app appear unresponsive
 
 ## 0.6.0 - 2026-10-21
 

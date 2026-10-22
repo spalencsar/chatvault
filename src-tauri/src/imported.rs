@@ -2,13 +2,14 @@
 
 use crate::others::OtherChat;
 use crate::paths::*;
-use crate::providers::{clip, Msg};
+use crate::providers::{Msg, clip};
 use serde::Serialize;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const MAX_BYTES: u64 = 50_000_000;
+const INBOX_CACHE_VERSION: &str = "2";
 
 #[derive(Serialize, Default, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -42,15 +43,35 @@ pub fn ensure_inbox() -> Option<PathBuf> {
 
 pub fn ingest_inbox() {
     let Some(p) = ensure_inbox() else { return };
+    let Some(stamp) = inbox_fingerprint(&p) else {
+        return;
+    };
+    let Some(marker) = root().map(|d| d.join(".inbox-fingerprint")) else {
+        return;
+    };
+    if fs::read_to_string(&marker).ok().as_deref() == Some(&stamp) {
+        return;
+    }
     let _ = import_paths(&[p.to_string_lossy().into_owned()]);
+    // Remember unsupported files too. A parser upgrade changes the cache
+    // version and retries them, while an unchanged large export is not parsed
+    // again on every scan.
+    let _ = fs::write(marker, stamp);
 }
 
 fn mtime(p: &Path) -> i64 {
-    fs::metadata(p).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64).unwrap_or(0)
+    fs::metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn ms_of(iso: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(iso.trim()).ok().map(|d| d.timestamp_millis())
+    chrono::DateTime::parse_from_rfc3339(iso.trim())
+        .ok()
+        .map(|d| d.timestamp_millis())
 }
 
 fn fnv1a(bytes: &[u8]) -> String {
@@ -164,8 +185,17 @@ fn collapse_ws(s: &str) -> String {
 fn flatten_text(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
-        Value::Array(a) => a.iter().map(flatten_text).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n"),
-        Value::Object(o) => o.get("text").or_else(|| o.get("content")).map(flatten_text).unwrap_or_default(),
+        Value::Array(a) => a
+            .iter()
+            .map(flatten_text)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Object(o) => o
+            .get("text")
+            .or_else(|| o.get("content"))
+            .map(flatten_text)
+            .unwrap_or_default(),
         _ => String::new(),
     }
 }
@@ -191,13 +221,32 @@ struct Parsed {
 fn push_json_msg(out: &mut Vec<Msg>, m: &Value) {
     let role = m.get("role").and_then(|r| r.as_str()).and_then(role_of);
     let Some(role) = role else { return };
-    let ts = m.get("timestamp").or_else(|| m.get("created_at")).and_then(|t| t.as_str()).unwrap_or("");
-    if let Some(th) = m.get("thinking").and_then(|t| t.as_str()).map(str::trim).filter(|t| !t.is_empty()) {
-        out.push(Msg::new("assistant", ts, clip(th, 8000), "reasoning"));
+    let ts = m
+        .get("timestamp")
+        .or_else(|| m.get("created_at"))
+        .or_else(|| m.get("capturedAt"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+    let thinking = m.get("thinking").map(flatten_text).unwrap_or_default();
+    if !thinking.trim().is_empty() {
+        out.push(Msg::new(
+            "assistant",
+            ts,
+            clip(thinking.trim(), 8000),
+            "reasoning",
+        ));
     }
-    let mut text = flatten_text(m.get("content").unwrap_or(&Value::Null));
+    let mut text = flatten_text(
+        m.get("content")
+            .or_else(|| m.get("contentText"))
+            .unwrap_or(&Value::Null),
+    );
     if text.trim().is_empty() {
-        if let Some(html) = m.get("html").and_then(|h| h.as_str()) {
+        if let Some(html) = m
+            .get("html")
+            .or_else(|| m.get("htmlContent"))
+            .and_then(|h| h.as_str())
+        {
             text = strip_html(html);
         }
     }
@@ -209,7 +258,10 @@ fn push_json_msg(out: &mut Vec<Msg>, m: &Value) {
 
 fn parse_json(v: &Value) -> Option<Parsed> {
     let meta = v.get("meta").or_else(|| v.get("conversation")).unwrap_or(v);
-    let msgs_v = v.get("messages").or_else(|| v.get("conversation").and_then(|c| c.get("messages"))).or_else(|| v.get("data").and_then(|c| c.get("messages")))?;
+    let msgs_v = v
+        .get("messages")
+        .or_else(|| v.get("conversation").and_then(|c| c.get("messages")))
+        .or_else(|| v.get("data").and_then(|c| c.get("messages")))?;
     let arr = msgs_v.as_array()?;
     let mut messages = Vec::new();
     for m in arr {
@@ -219,19 +271,54 @@ fn parse_json(v: &Value) -> Option<Parsed> {
         return None;
     }
     let platform = pretty_platform(
-        meta.get("platformName").and_then(|s| s.as_str()).or_else(|| meta.get("platform").and_then(|s| s.as_str())).unwrap_or(""),
+        meta.get("platformName")
+            .and_then(|s| s.as_str())
+            .or_else(|| meta.get("platform").and_then(|s| s.as_str()))
+            .unwrap_or(""),
     );
     let title = meta
         .get("title")
         .and_then(|s| s.as_str())
         .map(|t| clip(t.trim(), 80))
         .filter(|t| !t.is_empty())
-        .or_else(|| messages.iter().find(|m| m.role == "user").map(|m| clip(m.text.lines().next().unwrap_or("Chat").trim(), 80)))
+        .or_else(|| {
+            messages
+                .iter()
+                .find(|m| m.role == "user")
+                .map(|m| clip(m.text.lines().next().unwrap_or("Chat").trim(), 80))
+        })
         .unwrap_or_else(|| "Chat".into());
-    let model = meta.get("modelName").or_else(|| meta.get("model")).and_then(|s| s.as_str()).filter(|s| !s.is_empty()).map(String::from);
-    let exported = v.get("exportedAt").or_else(|| meta.get("exportedAt")).or_else(|| meta.get("date")).and_then(|s| s.as_str()).and_then(ms_of);
-    let last = messages.iter().rev().find_map(|m| ms_of(&m.ts)).or(exported);
-    Some(Parsed { title, platform, model, created_ms: exported, last_ms: last, messages })
+    let model = meta
+        .get("modelName")
+        .or_else(|| meta.get("model"))
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let exported = v
+        .get("exportedAt")
+        .or_else(|| meta.get("exportedAt"))
+        .or_else(|| meta.get("date"))
+        .and_then(|s| s.as_str())
+        .and_then(ms_of);
+    let created = meta
+        .get("firstSeenAt")
+        .and_then(|s| s.as_str())
+        .and_then(ms_of)
+        .or(exported);
+    let last = meta
+        .get("lastSeenAt")
+        .and_then(|s| s.as_str())
+        .and_then(ms_of)
+        .or_else(|| messages.iter().rev().find_map(|m| ms_of(&m.ts)))
+        .or(exported);
+    Some(Parsed {
+        title,
+        platform,
+        model,
+        created_ms: created,
+        last_ms: last,
+        messages,
+    })
 }
 
 fn parse_frontmatter(s: &str) -> (std::collections::BTreeMap<String, String>, &str) {
@@ -241,13 +328,20 @@ fn parse_frontmatter(s: &str) -> (std::collections::BTreeMap<String, String>, &s
         return (map, rest);
     }
     let after = rest[3..].trim_start_matches(['\n', '\r']);
-    let Some(end) = after.find("\n---") else { return (map, rest) };
+    let Some(end) = after.find("\n---") else {
+        return (map, rest);
+    };
     let yaml = &after[..end];
     let body = after[end + 4..].trim_start_matches(['\n', '\r']);
     for line in yaml.lines() {
-        let Some((k, v)) = line.split_once(':') else { continue };
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
         let mut val = v.trim().to_string();
-        if val.len() >= 2 && ((val.starts_with('"') && val.ends_with('"')) || (val.starts_with('\'') && val.ends_with('\''))) {
+        if val.len() >= 2
+            && ((val.starts_with('"') && val.ends_with('"'))
+                || (val.starts_with('\'') && val.ends_with('\'')))
+        {
             val = val[1..val.len() - 1].to_string();
         }
         map.insert(k.trim().to_string(), val);
@@ -257,8 +351,23 @@ fn parse_frontmatter(s: &str) -> (std::collections::BTreeMap<String, String>, &s
 
 fn unquote_md(s: &str) -> String {
     let lines: Vec<&str> = s.lines().collect();
-    if !lines.is_empty() && lines.iter().filter(|l| !l.trim().is_empty()).all(|l| l.starts_with('>')) {
-        lines.iter().map(|l| l.strip_prefix("> ").or_else(|| l.strip_prefix('>')).unwrap_or(l)).collect::<Vec<_>>().join("\n").trim().to_string()
+    if !lines.is_empty()
+        && lines
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .all(|l| l.starts_with('>'))
+    {
+        lines
+            .iter()
+            .map(|l| {
+                l.strip_prefix("> ")
+                    .or_else(|| l.strip_prefix('>'))
+                    .unwrap_or(l)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string()
     } else {
         s.trim().to_string()
     }
@@ -282,7 +391,11 @@ fn parse_md(s: &str) -> Option<Parsed> {
             messages.push(Msg::new("assistant", "", clip(&text, 8000), "reasoning"));
             return;
         }
-        let role = if h.contains("user") || h.contains("👤") || h.contains("you") { "user" } else { "assistant" };
+        let role = if h.contains("user") || h.contains("👤") || h.contains("you") {
+            "user"
+        } else {
+            "assistant"
+        };
         messages.push(Msg::new(role, "", text, "text"));
     };
     for line in body.lines() {
@@ -308,7 +421,11 @@ fn parse_md(s: &str) -> Option<Parsed> {
     if messages.is_empty() {
         return None;
     }
-    let platform_raw = meta.get("platform").or_else(|| meta.get("source_platform")).map(|s| s.as_str()).unwrap_or("");
+    let platform_raw = meta
+        .get("platform")
+        .or_else(|| meta.get("source_platform"))
+        .map(|s| s.as_str())
+        .unwrap_or("");
     if platform_raw.trim().is_empty() {
         return None;
     }
@@ -317,19 +434,57 @@ fn parse_md(s: &str) -> Option<Parsed> {
         .get("title")
         .map(|t| clip(t.trim(), 80))
         .filter(|t| !t.is_empty())
-        .or_else(|| messages.iter().find(|m| m.role == "user").map(|m| clip(m.text.lines().next().unwrap_or("Chat").trim(), 80)))
+        .or_else(|| {
+            messages
+                .iter()
+                .find(|m| m.role == "user")
+                .map(|m| clip(m.text.lines().next().unwrap_or("Chat").trim(), 80))
+        })
         .unwrap_or_else(|| "Chat".into());
     let model = meta.get("model").filter(|s| !s.is_empty()).cloned();
-    let created = meta.get("date").or_else(|| meta.get("exported_at")).and_then(|s| ms_of(s));
-    Some(Parsed { title, platform, model, created_ms: created, last_ms: created, messages })
+    let created = meta
+        .get("date")
+        .or_else(|| meta.get("exported_at"))
+        .and_then(|s| ms_of(s));
+    Some(Parsed {
+        title,
+        platform,
+        model,
+        created_ms: created,
+        last_ms: created,
+        messages,
+    })
+}
+
+/// NousSave full-capsule exports keep chats under `vines`. Some variants only
+/// carry them as `capsules[].vine`; prefer the top-level list so the same chat
+/// is not imported twice when both representations are present.
+fn exported_vines(v: &Value) -> Vec<&Value> {
+    if let Some(vines) = v
+        .get("vines")
+        .and_then(Value::as_array)
+        .filter(|v| !v.is_empty())
+    {
+        return vines.iter().collect();
+    }
+    v.get("capsules")
+        .and_then(Value::as_array)
+        .map(|capsules| capsules.iter().filter_map(|c| c.get("vine")).collect())
+        .unwrap_or_default()
 }
 
 fn parse_file(path: &Path, bytes: &[u8]) -> Result<Parsed, String> {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
     let text = String::from_utf8_lossy(bytes);
     if ext == "json" || text.trim_start().starts_with('{') {
         let v: Value = serde_json::from_str(text.trim()).map_err(|e| format!("JSON: {e}"))?;
-        parse_json(&v).ok_or_else(|| "No messages in this JSON".into())
+        let vines = exported_vines(&v);
+        let chat = if vines.len() == 1 { vines[0] } else { &v };
+        parse_json(chat).ok_or_else(|| "No messages in this JSON".into())
     } else if ext == "md" || ext == "markdown" {
         parse_md(&text).ok_or_else(|| "No messages in this Markdown".into())
     } else {
@@ -338,14 +493,20 @@ fn parse_file(path: &Path, bytes: &[u8]) -> Result<Parsed, String> {
 }
 
 pub fn messages(path: &Path) -> Vec<Msg> {
-    let Ok(bytes) = fs::read(path) else { return Vec::new() };
-    parse_file(path, &bytes).map(|p| p.messages).unwrap_or_default()
+    let Ok(bytes) = fs::read(path) else {
+        return Vec::new();
+    };
+    parse_file(path, &bytes)
+        .map(|p| p.messages)
+        .unwrap_or_default()
 }
 
 pub fn chat_files() -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Some(root) = root() else { return out };
-    let Ok(rd) = fs::read_dir(root) else { return out };
+    let Ok(rd) = fs::read_dir(root) else {
+        return out;
+    };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_file() {
@@ -362,8 +523,13 @@ pub fn scan(out: &mut Vec<OtherChat>) {
     ingest_inbox();
     for p in chat_files() {
         let Ok(bytes) = fs::read(&p) else { continue };
-        let Ok(parsed) = parse_file(&p, &bytes) else { continue };
-        let id = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let Ok(parsed) = parse_file(&p, &bytes) else {
+            continue;
+        };
+        let id = p
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
         if id.is_empty() {
             continue;
         }
@@ -384,7 +550,11 @@ pub fn scan(out: &mut Vec<OtherChat>) {
 }
 
 pub fn fingerprint() -> i64 {
-    let stored = chat_files().into_iter().map(|p| mtime(&p)).max().unwrap_or(0);
+    let stored = chat_files()
+        .into_iter()
+        .map(|p| mtime(&p))
+        .max()
+        .unwrap_or(0);
     let drop = inbox().map(|p| mtime(&p)).unwrap_or(0);
     stored.max(drop)
 }
@@ -426,6 +596,71 @@ fn collect_one(p: PathBuf, out: &mut Vec<PathBuf>, depth: u32) {
     }
 }
 
+fn supported_file(p: &Path) -> bool {
+    matches!(
+        p.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str(),
+        "json" | "md" | "markdown"
+    )
+}
+
+/// A cheap persistent identity for the drop folder. File metadata is used
+/// rather than contents so a large unchanged export can be skipped without
+/// first allocating and parsing it again. Parser upgrades change the version.
+fn inbox_fingerprint(dir: &Path) -> Option<String> {
+    let mut files = Vec::new();
+    collect_one(dir.to_path_buf(), &mut files, 0);
+    files.retain(|p| supported_file(p));
+    files.sort();
+    let mut state = format!("{INBOX_CACHE_VERSION}\n");
+    for p in files {
+        let meta = fs::metadata(&p).ok()?;
+        let modified = meta
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
+        state.push_str(&format!(
+            "{}\0{}\0{modified}\n",
+            p.to_string_lossy(),
+            meta.len()
+        ));
+    }
+    Some(fnv1a(state.as_bytes()))
+}
+
+/// Return one persistable document per chat. Legacy single-chat exports remain
+/// byte-for-byte intact. A full-capsule export is split into its vines so every
+/// imported conversation receives its own stable id and file.
+fn import_units(path: &Path, bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let text = String::from_utf8_lossy(bytes);
+    if ext != "json" && !text.trim_start().starts_with('{') {
+        parse_file(path, bytes)?;
+        return Ok(vec![bytes.to_vec()]);
+    }
+    let v: Value = serde_json::from_str(text.trim()).map_err(|e| format!("JSON: {e}"))?;
+    let vines = exported_vines(&v);
+    if vines.is_empty() {
+        parse_json(&v).ok_or_else(|| "No messages in this JSON".to_string())?;
+        return Ok(vec![bytes.to_vec()]);
+    }
+    let mut out = Vec::with_capacity(vines.len());
+    for (i, vine) in vines.into_iter().enumerate() {
+        parse_json(vine).ok_or_else(|| format!("No messages in chat {} of this JSON", i + 1))?;
+        out.push(serde_json::to_vec(vine).map_err(|e| format!("JSON: {e}"))?);
+    }
+    Ok(out)
+}
+
 fn looks_like_noussave(ext: &str, bytes: &[u8]) -> bool {
     let t = String::from_utf8_lossy(bytes);
     if ext == "json" {
@@ -445,8 +680,15 @@ pub fn import_paths(paths: &[String]) -> Result<ImportStats, String> {
     }
     let mut stats = ImportStats::default();
     for p in files {
-        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string());
-        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| p.display().to_string());
+        let ext = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
         if !matches!(ext.as_str(), "json" | "md" | "markdown") {
             continue;
         }
@@ -468,19 +710,26 @@ pub fn import_paths(paths: &[String]) -> Result<ImportStats, String> {
                 continue;
             }
         };
-        match parse_file(&p, &bytes) {
-            Ok(_) => {
-                let id = fnv1a(&bytes);
-                let dest = dir.join(format!("{id}.{}", if ext == "markdown" { "md".into() } else { ext }));
-                if dest.exists() {
-                    stats.skipped += 1;
-                    continue;
+        match import_units(&p, &bytes) {
+            Ok(units) => {
+                for unit in units {
+                    let id = fnv1a(&unit);
+                    let suffix = if ext == "markdown" {
+                        "md"
+                    } else {
+                        ext.as_str()
+                    };
+                    let dest = dir.join(format!("{id}.{suffix}"));
+                    if dest.exists() {
+                        stats.skipped += 1;
+                        continue;
+                    }
+                    if let Err(e) = fs::write(&dest, unit) {
+                        stats.failed.push(format!("{name}: {e}"));
+                        continue;
+                    }
+                    stats.added += 1;
                 }
-                if let Err(e) = fs::write(&dest, &bytes) {
-                    stats.failed.push(format!("{name}: {e}"));
-                    continue;
-                }
-                stats.added += 1;
             }
             Err(e) => {
                 if looks_like_noussave(&ext, &bytes) {
@@ -506,7 +755,10 @@ mod tests {
         let dir = format!("{home}/Downloads");
         let stats = import_paths(&[dir]).expect("import Downloads");
         println!("{stats:?}");
-        assert!(stats.added + stats.skipped > 0, "expected NousSave files in Downloads");
+        assert!(
+            stats.added + stats.skipped > 0,
+            "expected NousSave files in Downloads"
+        );
     }
 
     #[test]
@@ -529,6 +781,67 @@ mod tests {
     }
 
     #[test]
+    fn vines_full_capsule_splits_and_reads_each_chat() {
+        let vine = |id: &str, title: &str| {
+            serde_json::json!({
+                "id": id,
+                "title": title,
+                "platform": "chatgpt",
+                "platformName": "ChatGPT",
+                "modelName": "GPT-6",
+                "firstSeenAt": "2026-10-20T10:00:00Z",
+                "lastSeenAt": "2026-10-20T10:01:00Z",
+                "messages": [
+                    { "role": "user", "capturedAt": "2026-10-20T10:00:00Z", "contentText": "Question" },
+                    { "role": "assistant", "capturedAt": "2026-10-20T10:01:00Z", "contentText": "Answer", "thinking": "Check it" }
+                ]
+            })
+        };
+        let first = vine("one", "First chat");
+        let v = serde_json::json!({
+            "schemaVersion": 2,
+            "exportKind": "vines-full-capsule",
+            "vines": [first.clone(), vine("two", "Second chat")],
+            "capsules": [{ "vine": first }]
+        });
+        let bytes = serde_json::to_vec(&v).unwrap();
+        let units = import_units(Path::new("capsule.json"), &bytes).unwrap();
+        assert_eq!(
+            units.len(),
+            2,
+            "top-level vines win over duplicate capsule vines"
+        );
+
+        let parsed = parse_file(Path::new("one.json"), &units[0]).unwrap();
+        assert_eq!(parsed.title, "First chat");
+        assert_eq!(parsed.platform, "ChatGPT");
+        assert_eq!(parsed.model.as_deref(), Some("GPT-6"));
+        assert_eq!(parsed.messages.len(), 3);
+        assert_eq!(parsed.messages[0].text, "Question");
+        assert_eq!(parsed.messages[1].kind, "reasoning");
+        assert_eq!(parsed.messages[2].text, "Answer");
+        assert_eq!(parsed.created_ms, ms_of("2026-10-20T10:00:00Z"));
+        assert_eq!(parsed.last_ms, ms_of("2026-10-20T10:01:00Z"));
+    }
+
+    #[test]
+    fn inbox_fingerprint_changes_only_with_supported_sources() {
+        let dir = std::env::temp_dir().join(format!(
+            "chatvault-import-fingerprint-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("chat.json"), "{}").unwrap();
+        let first = inbox_fingerprint(&dir).unwrap();
+        fs::write(dir.join("README.txt"), "ignored").unwrap();
+        assert_eq!(first, inbox_fingerprint(&dir).unwrap());
+        fs::write(dir.join("chat.json"), "{\"changed\":true}").unwrap();
+        assert_ne!(first, inbox_fingerprint(&dir).unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn real_noussave_markdown_in_downloads_parses() {
         let home = std::env::var("HOME").unwrap_or_default();
         let p = PathBuf::from(home).join("Downloads/202610161445-chatgpt-Bitte-überprüfe-deine-technische-Interpretation-de-turn-2msg.md");
@@ -541,6 +854,38 @@ mod tests {
         assert!(parsed.messages.iter().any(|m| m.role == "user"));
         assert!(parsed.messages.iter().any(|m| m.role == "assistant"));
         assert!(parsed.messages.iter().any(|m| m.kind == "reasoning"));
+    }
+
+    #[test]
+    fn real_vines_capsule_in_inbox_parses() {
+        let Some(inbox) = inbox() else { return };
+        let Ok(entries) = fs::read_dir(inbox) else {
+            return;
+        };
+        let Some(path) = entries.flatten().map(|entry| entry.path()).find(|path| {
+            path.extension().and_then(|ext| ext.to_str()) == Some("json")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with("-capsule.json"))
+        }) else {
+            return;
+        };
+
+        let bytes = fs::read(&path).expect("read real NousSave capsule");
+        let units = import_units(&path, &bytes).expect("split real NousSave capsule");
+        assert!(!units.is_empty());
+        let parsed = parse_file(Path::new("vine.json"), &units[0])
+            .expect("parse first chat in real NousSave capsule");
+        assert_eq!(parsed.platform, "ChatGPT");
+        assert!(parsed.messages.len() >= 500);
+        assert!(parsed.messages.iter().any(|message| message.role == "user"));
+        assert!(
+            parsed
+                .messages
+                .iter()
+                .any(|message| message.role == "assistant")
+        );
     }
 
     #[test]
