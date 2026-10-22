@@ -9,6 +9,8 @@
 - Restored images embedded by NousSave in `htmlContent` instead of leaving
   `[Image: image omitted …]` placeholders in imported conversations
 - Show native Grok and Gemini icons for imported chats from those platforms
+- Point in-app project, release, and issue links to the current ChatVault
+  repository while retaining the original project attribution in the docs
 - Prevented the automatic drop-folder scan from repeatedly parsing unchanged
   large exports, which could make the app appear unresponsive
 

@@ -17,7 +17,7 @@ function PixelHeart({ className }: { className?: string }) {
   );
 }
 
-export const REPO_URL = "https://github.com/ssanaullahrais/Chat-Vault";
+export const REPO_URL = "https://github.com/spalencsar/chatvault";
 
 /** "Made with love", the open source link and the app version. Shown at the bottom of the sidebar and of the overview. */
 export function MadeWith({ className }: { className?: string }) {
