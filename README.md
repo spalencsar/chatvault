@@ -9,7 +9,7 @@
 Browse, search, organize, export, back up, and continue conversations created
 by the AI tools already installed on your Linux system.
 
-Claude Code · Codex · Cursor · Grok · Hermes Agent · Gemini CLI · OpenCode · Cline · imported web chats
+Claude Code · Codex · Cursor · Antigravity · Grok · Hermes Agent · Gemini CLI · OpenCode · Cline · imported web chats
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-24C8DB?style=flat-square)](https://tauri.app)
@@ -41,6 +41,8 @@ without requiring an account or sending chat content to a remote service.
   tool.
 - **Backup and sync** — maintain an optional local backup alongside the original
   session files.
+- **Independent archive** — keep normalized, private copies of parsed chats so
+  they remain readable even if an original tool removes or changes its data.
 - **Web-chat imports** — import NousSave JSON or Markdown exports from services
   such as ChatGPT, Gemini, and Grok.
 
@@ -69,6 +71,7 @@ without requiring an account or sending chat content to a remote service.
 | Claude Code | `~/.claude/projects` |
 | Codex | `~/.codex/sessions` |
 | Cursor | `~/.cursor` |
+| Antigravity | `~/.gemini/antigravity/conversation_summaries.db` (read-only) |
 | Grok | `~/.grok/sessions` |
 | Hermes Agent | `~/.hermes/state.db` (read-only) |
 | Gemini CLI | `~/.gemini/tmp` |
@@ -76,8 +79,11 @@ without requiring an account or sending chat content to a remote service.
 | Cline | `~/.cline/data/sessions` |
 | NousSave imports | `~/Documents/ChatVault Import` |
 
-The local search index and managed imports are stored in
-`~/.local/share/chatvault`. Sources can be enabled individually in Settings.
+The local search index, managed imports, and independent conversation snapshots
+are stored in `~/.local/share/chatvault`. Snapshots live below
+`~/.local/share/chatvault/archive`, are refreshed when a source chat changes,
+and appear only when the original is no longer available. Sources can be
+enabled individually in Settings.
 
 ## Privacy
 
@@ -86,7 +92,8 @@ ChatVault is designed around local data:
 - Conversation content is read and indexed on your machine.
 - Chat content is not uploaded by ChatVault.
 - No ChatVault account is required.
-- Imported files remain under ChatVault's local data directory.
+- Imported files and independent snapshots remain under ChatVault's local data
+  directory.
 - Backups are written only to the folder you select.
 
 Automatic updates are currently disabled. Updates are installed explicitly
@@ -130,11 +137,11 @@ Prebuilt x86_64 Linux packages are available from the
 
 ```bash
 # Debian or Ubuntu
-sudo apt install ./ChatVault_0.6.1_amd64.deb
+sudo apt install ./ChatVault_0.6.2_amd64.deb
 
 # Distribution-independent AppImage
-chmod +x ChatVault_0.6.1_amd64.AppImage
-./ChatVault_0.6.1_amd64.AppImage
+chmod +x ChatVault_0.6.2_amd64.AppImage
+./ChatVault_0.6.2_amd64.AppImage
 ```
 
 When building from source instead, run:

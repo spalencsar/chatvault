@@ -120,7 +120,7 @@ export default function App() {
   const [renamingAccount, setRenamingAccount] = useState<string | null>(null);
   const [accountOpen, setAccountOpen] = useState(false);
 
-  const [overview, setOverview] = useState<Record<Provider, Overview | null>>({ claude: null, codex: null, cursor: null, gemini: null, opencode: null, cline: null, grok: null, hermes: null, imported: null });
+  const [overview, setOverview] = useState<Record<Provider, Overview | null>>({ claude: null, codex: null, cursor: null, gemini: null, opencode: null, cline: null, grok: null, hermes: null, antigravity: null, imported: null });
   const [accountInfo, setAccountInfo] = useState<AccountInfo[]>([]);
   const account = provider === "all" ? "all" : accounts[provider] ?? "all";
   const [query, setQuery] = useState("");
@@ -484,7 +484,7 @@ export default function App() {
       busy = true;
       try {
         const seen = new Map<string, Chat>();
-        listed.current.forEach((c) => !isHandoffOnly(c.provider) && seen.set(chatKey(c), c));
+        listed.current.forEach((c) => !isHandoffOnly(c.provider) && !c.path.startsWith("archive:") && seen.set(chatKey(c), c));
         const chats = [...seen.values()];
         const ms = await invoke<number[]>("chat_stamps", { items: chats.map((c) => [c.provider, c.path]) });
         const now = Date.now();
@@ -562,7 +562,7 @@ export default function App() {
     stamp.current = "";
     setLive(false);
     const sel = selected;
-    if (!sel || isHandoffOnly(sel.provider)) return;
+    if (!sel || isHandoffOnly(sel.provider) || sel.path.startsWith("archive:")) return;
     let busy = false;
     const id = window.setInterval(async () => {
       const cur = pageRef.current;

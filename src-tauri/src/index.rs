@@ -4,7 +4,7 @@
 use crate::paths::*;
 use crate::providers::*;
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -17,7 +17,7 @@ use tauri::{AppHandle, Emitter};
 static BODIES_BUSY: AtomicBool = AtomicBool::new(false);
 static REFRESHING: AtomicBool = AtomicBool::new(false);
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatSummary {
     pub provider: String,
@@ -83,6 +83,7 @@ pub fn open_db() -> Result<Connection, String> {
          CREATE TABLE IF NOT EXISTS chat_tags(provider TEXT NOT NULL, id TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY(provider, id, tag));
          CREATE VIRTUAL TABLE IF NOT EXISTS chat_bodies USING fts5(key UNINDEXED, body, tokenize='unicode61 remove_diacritics 2');
          CREATE TABLE IF NOT EXISTS body_state(key TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS archive_state(key TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS source_state(name TEXT PRIMARY KEY, value TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS backed_up(provider TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY(provider, id));
          CREATE INDEX IF NOT EXISTS chats_last ON chats(provider, last_ms DESC);
@@ -426,8 +427,13 @@ fn upsert(c: &Connection, r: &Row, replace: bool) -> rusqlite::Result<()> {
 pub fn files_fingerprint() -> (usize, i64) {
     let files = collect_files();
     let newest = files.iter().map(|f| mtime_ms(&f.path).1).max().unwrap_or(0);
-    // Gemini CLI, OpenCode and Cline writes count as changes too.
-    (files.len(), newest.max(crate::others::fingerprint()).max(crate::codex_db::fingerprint()))
+    // Keep the sources independent instead of taking only their maximum: a database can disappear
+    // while a newer transcript still exists, and that removal must trigger the archive fallback.
+    let signature = (newest as u64).wrapping_mul(0x9e37_79b1)
+        ^ (crate::others::fingerprint() as u64).rotate_left(17)
+        ^ (crate::codex_db::fingerprint() as u64).rotate_left(37);
+    // JavaScript represents integers exactly up to 53 bits.
+    (files.len(), (signature & ((1_u64 << 52) - 1)) as i64)
 }
 
 pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
@@ -436,7 +442,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
     }
     let result = (|| {
         let mut c = open_db()?;
-        let source_upgrade = c.query_row("SELECT value FROM source_state WHERE name='local_sources'",[],|r|r.get::<_,String>(0)).ok().as_deref()!=Some("7");
+        let source_upgrade = c.query_row("SELECT value FROM source_state WHERE name='local_sources'",[],|r|r.get::<_,String>(0)).ok().as_deref()!=Some("9");
         // Rows saved with a raw encoded folder name are rebuilt once so they get the readable project name.
         let _ = c.execute("DELETE FROM chats WHERE provider='claude' AND project LIKE 'C--%'", []);
         // Chats without desktop-app records are rebuilt once so they pick up the folder found in the transcript.
@@ -456,7 +462,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
         let native_ids:HashSet<String>=native_chats.iter().map(|ch|ch.id.clone()).collect();
 
         let tx = c.transaction().map_err(|e| e.to_string())?;
-        for (path, _) in known.iter().filter(|(p, _)| !seen.contains(*p) && !p.starts_with("cursor-") && !p.starts_with("codex-db:") && !crate::others::is_virtual(p) && !Path::new(p).exists()) {
+        for (path, _) in known.iter().filter(|(p, _)| !seen.contains(*p) && !crate::archive::is_path(p) && !p.starts_with("cursor-") && !p.starts_with("codex-db:") && !crate::others::is_virtual(p) && !Path::new(p).exists()) {
             let _ = tx.execute(
                 "DELETE FROM chats_fts WHERE key IN (SELECT provider||':'||id FROM chats WHERE path=?1)",
                 params![path],
@@ -562,8 +568,8 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
         // Gemini CLI, OpenCode and Cline are rebuilt whenever one of their files changed.
         {
             let ofp = crate::others::fingerprint();
-            let olast: i64 = c.query_row(&format!("SELECT COALESCE(MAX(mtime),0) FROM chats WHERE provider IN ({})", crate::others::SQL_IN), [], |r| r.get(0)).unwrap_or(0);
-            if source_upgrade || (ofp > 0 && ofp != olast) {
+            let olast: i64 = c.query_row(&format!("SELECT COALESCE(MAX(mtime),0) FROM chats WHERE provider IN ({}) AND path NOT LIKE 'archive:%'", crate::others::SQL_IN), [], |r| r.get(0)).unwrap_or(0);
+            if source_upgrade || ofp != olast {
                 let chats: Vec<_> = crate::others::scan().into_iter().filter(|c| crate::integrations::is_enabled(c.provider)).collect();
                 let tx = c.transaction().map_err(|e| e.to_string())?;
                 let _ = tx.execute(&format!("DELETE FROM chats_fts WHERE key IN (SELECT provider||':'||id FROM chats WHERE provider IN ({}))", crate::others::SQL_IN), []);
@@ -604,8 +610,8 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
         }
 
         let fp = crate::cursor::fingerprint();
-        let last: i64 = c.query_row("SELECT COALESCE(MAX(mtime),0) FROM chats WHERE provider='cursor'", [], |r| r.get(0)).unwrap_or(0);
-        if source_upgrade || (fp > 0 && fp != last) {
+        let last: i64 = c.query_row("SELECT COALESCE(MAX(mtime),0) FROM chats WHERE provider='cursor' AND path NOT LIKE 'archive:%'", [], |r| r.get(0)).unwrap_or(0);
+        if source_upgrade || fp != last {
             let chats = if crate::integrations::is_enabled("cursor") { crate::cursor::scan() } else { Vec::new() };
             let cursor_account = crate::cursor::account_email();
             let tx = c.transaction().map_err(|e| e.to_string())?;
@@ -638,8 +644,23 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
             }
             tx.commit().map_err(|e| e.to_string())?;
         }
+
+        // A normalized ChatVault snapshot is a fallback, never a duplicate: keep the live row whenever one exists.
+        {
+            let tx = c.transaction().map_err(|e| e.to_string())?;
+            for archived in crate::archive::scan().into_iter().filter(|a| crate::integrations::is_enabled(&a.chat.provider)) {
+                let exists: bool = tx
+                    .query_row("SELECT EXISTS(SELECT 1 FROM chats WHERE provider=?1 AND id=?2)", params![archived.chat.provider, archived.chat.id], |r| r.get(0))
+                    .unwrap_or(false);
+                if exists { continue; }
+                let title = archived.chat.title.clone();
+                let row = Row { s: archived.chat, mtime: archived.mtime, preview: title };
+                let _ = upsert(&tx, &row, true);
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+        }
         if let Some(a) = app { let _ = a.emit("index-progress", Progress { phase: "Done".into(), done: total, total }); }
-        c.execute("INSERT OR REPLACE INTO source_state(name,value) VALUES('local_sources','7')",[]).map_err(|e|e.to_string())?;
+        c.execute("INSERT OR REPLACE INTO source_state(name,value) VALUES('local_sources','9')",[]).map_err(|e|e.to_string())?;
         Ok(())
     })();
     REFRESHING.store(false, Ordering::SeqCst);
@@ -681,6 +702,7 @@ fn row_to_summary(r: &rusqlite::Row) -> rusqlite::Result<ChatSummary> {
 }
 
 const COLS: &str = "provider,id,local_id,title,account,project,cwd,created_ms,last_ms,archived,size,path,model,has_meta,backup,EXISTS(SELECT 1 FROM user_archive u WHERE u.provider=chats.provider AND u.id=chats.id)";
+const COLS_C: &str = "c.provider,c.id,c.local_id,c.title,c.account,c.project,c.cwd,c.created_ms,c.last_ms,c.archived,c.size,c.path,c.model,c.has_meta,c.backup,EXISTS(SELECT 1 FROM user_archive u WHERE u.provider=c.provider AND u.id=c.id)";
 
 pub fn query(provider: &str, account: Option<String>, q: &str, offset: i64, limit: i64, sort: &str, scope: &str) -> Result<Page, String> {
     let c = open_db()?;
@@ -820,25 +842,31 @@ pub fn index_bodies(app: Option<&AppHandle>) -> Result<(), String> {
     }
     let result = (|| {
         let c = open_db()?;
-        let todo: Vec<(String, String, String, i64, i64)> = {
+        let todo: Vec<(ChatSummary, i64)> = {
             let mut st = c
                 .prepare(
-                    "SELECT c.provider, c.id, c.path, c.size, c.mtime FROM chats c
+                    &format!("SELECT {COLS_C},c.mtime FROM chats c
                      LEFT JOIN body_state b ON b.key = c.provider||':'||c.id
+                     LEFT JOIN archive_state a ON a.key = c.provider||':'||c.id
                      WHERE b.key IS NULL OR b.size != c.size OR b.mtime != c.mtime
-                     ORDER BY c.last_ms DESC",
+                        OR a.key IS NULL OR a.size != c.size OR a.mtime != c.mtime
+                     ORDER BY c.last_ms DESC"),
                 )
                 .map_err(|e| e.to_string())?;
-            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).map_err(|e| e.to_string())?;
+            let rows = st.query_map([], |r| Ok((row_to_summary(r)?, r.get(16)?))).map_err(|e| e.to_string())?;
             rows.flatten().collect()
         };
         let total = todo.len();
         let mut tx = c.unchecked_transaction().map_err(|e| e.to_string())?;
-        for (i, (provider, id, path, size, mtime)) in todo.iter().enumerate() {
-            let key = format!("{provider}:{id}");
+        for (i, (chat, mtime)) in todo.iter().enumerate() {
+            let provider = &chat.provider;
+            let path = &chat.path;
+            let key = format!("{}:{}", provider, chat.id);
             let mut body = String::new();
             let mut msgs: Vec<Msg> = Vec::new();
-            if provider == "codex" && path.starts_with("codex-db:") {
+            if crate::archive::is_path(path) {
+                msgs = crate::archive::read(path).unwrap_or_default();
+            } else if provider == "codex" && path.starts_with("codex-db:") {
                 msgs = crate::codex_db::read(path).unwrap_or_default();
             } else if provider == "cursor" {
                 msgs = crate::cursor::read(path).unwrap_or_default();
@@ -854,6 +882,7 @@ pub fn index_bodies(app: Option<&AppHandle>) -> Result<(), String> {
                     }
                 }
             }
+            let archive_ok = crate::archive::is_path(path) || crate::archive::save(chat, &msgs).is_ok();
             for m in msgs.iter().filter(|m| matches!(m.kind.as_str(), "text" | "summary")) {
                 if body.len() > 400_000 {
                     break;
@@ -865,7 +894,10 @@ pub fn index_bodies(app: Option<&AppHandle>) -> Result<(), String> {
             if !body.is_empty() {
                 let _ = tx.execute("INSERT INTO chat_bodies(key, body) VALUES(?1, ?2)", params![key, body]);
             }
-            let _ = tx.execute("INSERT OR REPLACE INTO body_state(key,size,mtime) VALUES(?1,?2,?3)", params![key, size, mtime]);
+            let _ = tx.execute("INSERT OR REPLACE INTO body_state(key,size,mtime) VALUES(?1,?2,?3)", params![key, chat.size, mtime]);
+            if archive_ok {
+                let _ = tx.execute("INSERT OR REPLACE INTO archive_state(key,size,mtime) VALUES(?1,?2,?3)", params![key, chat.size, mtime]);
+            }
             if (i + 1) % 40 == 0 {
                 tx.commit().map_err(|e| e.to_string())?;
                 tx = c.unchecked_transaction().map_err(|e| e.to_string())?;
@@ -878,6 +910,7 @@ pub fn index_bodies(app: Option<&AppHandle>) -> Result<(), String> {
         // chats that no longer exist
         let _ = c.execute("DELETE FROM chat_bodies WHERE key NOT IN (SELECT provider||':'||id FROM chats)", []);
         let _ = c.execute("DELETE FROM body_state WHERE key NOT IN (SELECT provider||':'||id FROM chats)", []);
+        let _ = c.execute("DELETE FROM archive_state WHERE key NOT IN (SELECT provider||':'||id FROM chats)", []);
         if let Some(a) = app {
             let _ = a.emit("search-index-progress", (total, total));
         }

@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 0.6.2 - 2026-11-12
+
+### Added
+
+- Added read-only support for Google Antigravity conversations from its local
+  SQLite search index, including ordered user/agent messages, projects, local
+  search, overview statistics, Markdown export, source settings, and a native
+  provider icon
+- Added a provider-independent local archive under
+  `~/.local/share/chatvault/archive`. ChatVault now keeps atomic normalized
+  snapshots of parsed conversations, uses them when a live source disappears,
+  and includes them in backup and restore operations
+
+### Changed
+
+- Archived copies are treated as read-only handoff sources in the interface,
+  while live provider data remains the preferred source without duplicate rows
+
+### Fixed
+
+- Detect source-database removal independently from newer transcript files so
+  ChatVault can activate its managed archive fallback without an app restart
+
 ## 0.6.1 - 2026-10-22
 
 ### Added

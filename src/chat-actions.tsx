@@ -21,10 +21,10 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-export type Provider = "claude" | "codex" | "cursor" | "gemini" | "opencode" | "cline" | "grok" | "hermes" | "imported";
+export type Provider = "claude" | "codex" | "cursor" | "gemini" | "opencode" | "cline" | "grok" | "hermes" | "antigravity" | "imported";
 /** What the sidebar lists: one tool, or every tool together. */
 export type Tool = Provider | "all";
-const EVERY_PROVIDER: Provider[] = ["claude", "codex", "cursor", "grok", "hermes", "gemini", "opencode", "cline", "imported"];
+const EVERY_PROVIDER: Provider[] = ["claude", "codex", "cursor", "grok", "hermes", "antigravity", "gemini", "opencode", "cline", "imported"];
 const EVERY_CORE: Provider[] = ["claude", "codex", "cursor", "grok"];
 /** The tools ChatVault looks at. A tool switched off in Settings is left out, so every list and chart that reads this drops it. */
 export const PROVIDERS: Provider[] = [...EVERY_PROVIDER];
@@ -49,11 +49,11 @@ export const isHandoffOnly = (p: Provider) => p !== "claude" && p !== "codex";
  */
 export type DeleteKind = "trash" | "opencode" | "blocked";
 export const deleteKind = (c: { provider: Provider; path: string }): DeleteKind =>
-  c.provider === "opencode" ? "opencode" : c.path.startsWith("cursor-ide:") || c.path.startsWith("codex-db:") || c.path.startsWith("hermes-db:") ? "blocked" : "trash";
+  c.provider === "opencode" ? "opencode" : c.path.startsWith("cursor-ide:") || c.path.startsWith("codex-db:") || c.path.startsWith("hermes-db:") || c.path.startsWith("antigravity-db:") ? "blocked" : "trash";
 /** What a click on a grayed Delete tells the user. */
 export const deleteBlockedMessage = (tool: string) =>
   `This chat is stored inside ${tool} itself, so ChatVault can't delete it. Delete it in ${tool}, or use Archive to hide it here.`;
-export const PROVIDER_SHORT: Record<Provider, string> = { claude: "Claude", codex: "Codex", cursor: "Cursor", gemini: "Gemini", opencode: "OpenCode", cline: "Cline", grok: "Grok", hermes: "Hermes", imported: "Imported" };
+export const PROVIDER_SHORT: Record<Provider, string> = { claude: "Claude", codex: "Codex", cursor: "Cursor", gemini: "Gemini", opencode: "OpenCode", cline: "Cline", grok: "Grok", hermes: "Hermes", antigravity: "Antigravity", imported: "Imported" };
 
 export type Chat = {
   provider: Provider;
@@ -97,7 +97,7 @@ export type AccountInfo = {
   plan: string | null;
 };
 
-export const PROVIDER_NAME: Record<Provider, string> = { claude: "Claude Code", codex: "Codex", cursor: "Cursor", gemini: "Gemini CLI", opencode: "OpenCode", cline: "Cline", grok: "Grok", hermes: "Hermes Agent", imported: "Imported" };
+export const PROVIDER_NAME: Record<Provider, string> = { claude: "Claude Code", codex: "Codex", cursor: "Cursor", gemini: "Gemini CLI", opencode: "OpenCode", cline: "Cline", grok: "Grok", hermes: "Hermes Agent", antigravity: "Antigravity", imported: "Imported" };
 
 export const fmtDate = (ms: number) =>
   new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
@@ -492,7 +492,7 @@ function handoffActions(chat: Chat, toast: Toast, skip: Provider[]): ChatAction[
 
 
 export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): ChatAction[] {
-  if (isHandoffOnly(chat.provider)) return cursorActions(chat, toast, msgs);
+  if (isHandoffOnly(chat.provider) || chat.path.startsWith("archive:")) return handoffOnlyActions(chat, toast, msgs);
   const isClaude = chat.provider === "claude";
   const cd = cdTo(chat);
   // Always the whole chat from its file: the messages loaded on screen are only the newest page of it.
@@ -679,9 +679,11 @@ export function chatActions(chat: Chat, toast: Toast, msgs?: Msg[] | null): Chat
   return list;
 }
 
-/** Cursor chats have no command-line resume, so they continue in Claude Code or Codex through a handoff file. */
-function cursorActions(chat: Chat, toast: Toast, _msgs?: Msg[] | null): ChatAction[] {
+/** Read-only sources and managed archive copies continue in another agent through a handoff file. */
+function handoffOnlyActions(chat: Chat, toast: Toast, _msgs?: Msg[] | null): ChatAction[] {
   const cd = cdTo(chat);
+  const source = PROVIDER_SHORT[chat.provider];
+  const archivedCopy = chat.path.startsWith("archive:");
   // Always the whole chat from its file: the messages loaded on screen are only the newest page of it.
   const allMsgs = () => loadAll(chat);
   const copy = async (text: string, what: string) => {
@@ -697,7 +699,7 @@ function cursorActions(chat: Chat, toast: Toast, _msgs?: Msg[] | null): ChatActi
     {
       id: "continue-claude",
       label: "Continue in Claude",
-      hint: "Saves a handoff file with this Cursor chat and starts Claude Code with it.",
+      hint: `Saves a handoff file with this ${source} chat and starts Claude Code with it.`,
       icon: Sparkles,
       group: "Continue",
       slot: 1,
@@ -706,7 +708,7 @@ function cursorActions(chat: Chat, toast: Toast, _msgs?: Msg[] | null): ChatActi
     {
       id: "continue-codex",
       label: "Continue in Codex",
-      hint: "Saves a handoff file with this Cursor chat and starts Codex with it.",
+      hint: `Saves a handoff file with this ${source} chat and starts Codex with it.`,
       icon: Bot,
       group: "Continue",
       slot: 2,
@@ -714,15 +716,17 @@ function cursorActions(chat: Chat, toast: Toast, _msgs?: Msg[] | null): ChatActi
     },
   ];
   if (chat.cwd) {
-    list.push(
-      {
+    if (chat.provider === "cursor" && !archivedCopy) {
+      list.push({
         id: "open-cursor",
         label: "Open project in Cursor",
         hint: "Opens this chat's project folder in Cursor.",
         icon: ExternalLink,
         group: "Open",
         run: () => invoke<void>("open_in_cursor", { path: chat.cwd }),
-      },
+      });
+    }
+    list.push(
       {
         id: "folder",
         label: "Open project folder",
@@ -736,8 +740,8 @@ function cursorActions(chat: Chat, toast: Toast, _msgs?: Msg[] | null): ChatActi
   list.push(
     {
       id: "reveal",
-      label: "Show Cursor data file",
-      hint: "Shows the file Cursor keeps this chat in.",
+      label: archivedCopy ? "Show archived copy" : `Show ${source} data file`,
+      hint: archivedCopy ? "Shows the independent copy managed by ChatVault." : `Shows the file ${source} keeps this chat in.`,
       icon: FolderOpen,
       group: "Open",
       run: () => invoke("reveal_in_folder", { path: chat.path }),

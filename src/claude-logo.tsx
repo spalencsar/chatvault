@@ -197,6 +197,24 @@ export function HermesLogo({ className }: { className?: string }) {
   );
 }
 
+/** Google Antigravity's arched gradient mark. */
+export function AntigravityLogo({ className }: { className?: string }) {
+  const id = useId().replace(/:/g, "");
+  return (
+    <svg viewBox="0 0 96 96" className={className} aria-hidden fill="none">
+      <defs>
+        <linearGradient id={`${id}antigravity`} x1="8" y1="12" x2="86" y2="90" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#FBBC04" />
+          <stop offset=".32" stopColor="#00B95C" />
+          <stop offset=".68" stopColor="#3186FF" />
+          <stop offset="1" stopColor="#FC413D" />
+        </linearGradient>
+      </defs>
+      <path d="M85.973 89.344c5.25 3.937 13.125 1.312 5.907-5.906-21.657-21-17.063-78.75-43.97-78.75-26.905 0-22.312 57.75-43.968 78.75-7.875 7.874.656 9.843 5.906 5.906C30.192 75.563 28.88 51.28 47.911 51.28c19.031 0 17.719 24.282 38.062 38.063Z" fill={`url(#${id}antigravity)`} />
+    </svg>
+  );
+}
+
 export function ProviderLogo({ provider, className }: { provider: Provider; className?: string }) {
   if (provider === "claude") return <ClaudeLogo className={className} />;
   if (provider === "codex") return <CodexLogo className={className} />;
@@ -205,6 +223,7 @@ export function ProviderLogo({ provider, className }: { provider: Provider; clas
   if (provider === "opencode") return <OpenCodeLogo className={className} />;
   if (provider === "grok") return <GrokLogo className={className} />;
   if (provider === "hermes") return <HermesLogo className={className} />;
+  if (provider === "antigravity") return <AntigravityLogo className={className} />;
   if (provider === "imported") return <ImportedLogo className={className} />;
   return <ClineLogo className={className} />;
 }

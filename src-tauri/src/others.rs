@@ -10,9 +10,9 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const TOOLS: [&str; 6] = ["gemini", "opencode", "cline", "grok", "hermes", "imported"];
+pub const TOOLS: [&str; 7] = ["gemini", "opencode", "cline", "grok", "hermes", "antigravity", "imported"];
 /// For SQL `IN (...)` when the index rebuilds these tools together.
-pub const SQL_IN: &str = "'gemini','opencode','cline','grok','hermes','imported'";
+pub const SQL_IN: &str = "'gemini','opencode','cline','grok','hermes','antigravity','imported'";
 
 pub struct OtherChat {
     pub provider: &'static str,
@@ -447,6 +447,7 @@ pub fn scan() -> Vec<OtherChat> {
     scan_cline(&mut out);
     crate::grok::scan(&mut out);
     crate::hermes::scan(&mut out);
+    crate::antigravity::scan(&mut out);
     crate::imported::scan(&mut out);
     out
 }
@@ -466,7 +467,7 @@ pub fn fingerprint() -> i64 {
         wal.push("-wal");
         m = m.max(mtime(Path::new(&wal)));
     }
-    m.max(crate::grok::fingerprint()).max(crate::hermes::fingerprint()).max(crate::imported::fingerprint())
+    m.max(crate::grok::fingerprint()).max(crate::hermes::fingerprint()).max(crate::antigravity::fingerprint()).max(crate::imported::fingerprint())
 }
 
 pub fn read(path: &str) -> Result<Vec<Msg>, String> {
@@ -485,6 +486,9 @@ pub fn read(path: &str) -> Result<Vec<Msg>, String> {
     if path.starts_with("hermes-db:") {
         return crate::hermes::read(path);
     }
+    if path.starts_with("antigravity-db:") {
+        return crate::antigravity::read(path);
+    }
     if let Some(p) = path.strip_prefix("imported:") {
         return Ok(crate::imported::messages(Path::new(p)));
     }
@@ -492,7 +496,7 @@ pub fn read(path: &str) -> Result<Vec<Msg>, String> {
 }
 
 pub fn is_virtual(path: &str) -> bool {
-    path.starts_with("hermes-db:") || TOOLS.iter().any(|t| path.starts_with(&format!("{t}:")))
+    path.starts_with("hermes-db:") || path.starts_with("antigravity-db:") || TOOLS.iter().any(|t| path.starts_with(&format!("{t}:")))
 }
 
 /// What deleting a Gemini or Cline chat removes: only a file or folder that the scan itself lists, so a path
@@ -520,6 +524,9 @@ pub fn deletable(path: &str) -> Option<PathBuf> {
 
 /// The real file behind a virtual path, for "show file".
 pub fn real_file(path: &str) -> Option<PathBuf> {
+    if path.starts_with("antigravity-db:") {
+        return crate::antigravity::real_file(path);
+    }
     if let Some(p) = path.strip_prefix("gemini:").or_else(|| path.strip_prefix("cline:")) {
         let p = PathBuf::from(p);
         return p.exists().then_some(p);

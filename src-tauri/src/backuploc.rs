@@ -15,7 +15,7 @@ use tauri::{AppHandle, Emitter};
 /// Written into a folder that ChatVault made or moved a backup into, so a later check knows it is one.
 const MARKER: &str = ".chatvault-backup";
 /// Folders a backup contains; a folder with any of them (or a marker) counts as an existing ChatVault backup.
-const KNOWN: [&str; 9] = ["claude", "codex", "cursor", "gemini", "opencode", "cline", "grok", "imported", MARKER];
+const KNOWN: [&str; 10] = ["claude", "codex", "cursor", "gemini", "opencode", "cline", "grok", "imported", "archive", MARKER];
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct Config {

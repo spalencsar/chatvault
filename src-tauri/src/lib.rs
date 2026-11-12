@@ -1,3 +1,5 @@
+mod antigravity;
+mod archive;
 mod backuploc;
 mod cursor;
 mod cli;
@@ -41,11 +43,13 @@ struct MsgPage {
 
 /// Cursor and the other tools whose chats live in a database or in one JSON file, not in a transcript line by line.
 fn is_virtual(p: &str, path: &str) -> bool {
-    p == "cursor" || others::TOOLS.contains(&p) || (p == "codex" && path.starts_with("codex-db:"))
+    archive::is_path(path) || p == "cursor" || others::TOOLS.contains(&p) || (p == "codex" && path.starts_with("codex-db:"))
 }
 
 fn read_virtual(provider: &str, path: &str) -> Result<Vec<Msg>, String> {
-    if provider == "codex" && path.starts_with("codex-db:") {
+    if archive::is_path(path) {
+        archive::read(path)
+    } else if provider == "codex" && path.starts_with("codex-db:") {
         codex_db::read(path)
     } else if provider == "cursor" {
         cursor::read(path)
@@ -489,6 +493,12 @@ fn chat_stamps(items: Vec<(String, String)>) -> Vec<u64> {
 #[tauri::command]
 fn chat_stamp(provider: String, path: String) -> Result<(u64, u64), String> {
     provider_ok(&provider)?;
+    if archive::is_path(&path) {
+        let p = archive::real_file(&path).ok_or("That archived conversation is no longer available")?;
+        let md = std::fs::metadata(&p).map_err(|e| e.to_string())?;
+        let ms = md.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
+        return Ok((md.len(), ms));
+    }
     if provider=="codex" && path.starts_with("codex-db:") {
         return codex_db::stamp(&path);
     }
@@ -674,7 +684,9 @@ fn search_index_status() -> Result<(i64, i64), String> {
 
 #[tauri::command]
 fn reveal_in_folder(path: String) -> Result<(), String> {
-    let p = if path.starts_with("codex-db:") {
+    let p = if archive::is_path(&path) {
+        archive::real_file(&path).ok_or("That archived conversation is no longer available")?
+    } else if path.starts_with("codex-db:") {
         codex_db::real_file(&path)?
     } else if path.starts_with("cursor-") {
         cursor::real_file(&path).ok_or("That Cursor file is not available")?
@@ -729,7 +741,9 @@ async fn delete_chat(path: String) -> Result<(), String> {
             return Ok(());
         }
         // Gemini, Cline and Cursor keep chats as files or folders: those go to the Recycle Bin like Claude and Codex.
-        let target = if path.starts_with("gemini:") || path.starts_with("cline:") || path.starts_with("grok:") || path.starts_with("imported:") {
+        let target = if archive::is_path(&path) {
+            archive::deletable(&path)
+        } else if path.starts_with("gemini:") || path.starts_with("cline:") || path.starts_with("grok:") || path.starts_with("imported:") {
             others::deletable(&path)
         } else if path.starts_with("cursor-transcript:") || path.starts_with("cursor-cli:") {
             cursor::deletable(&path)
@@ -1042,7 +1056,7 @@ struct ExportDone {
     error: Option<String>,
 }
 
-const EXPORT_TOOLS: [(&str, &str); 9] = [("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor"), ("gemini", "Gemini CLI"), ("opencode", "OpenCode"), ("cline", "Cline"), ("grok", "Grok"), ("hermes", "Hermes Agent"), ("imported", "Imported")];
+const EXPORT_TOOLS: [(&str, &str); 10] = [("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor"), ("gemini", "Gemini CLI"), ("opencode", "OpenCode"), ("cline", "Cline"), ("grok", "Grok"), ("hermes", "Hermes Agent"), ("antigravity", "Antigravity"), ("imported", "Imported")];
 
 /// Reads one chat and returns its Markdown, or None when it has nothing readable. File names depend only on the chat, so
 /// exporting again to the same folder replaces the earlier files instead of piling up copies.

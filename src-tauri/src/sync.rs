@@ -1,4 +1,4 @@
-//! Backs up the chats of Claude Code, Codex, Cursor, Gemini CLI, OpenCode and Cline into Documents, and restores them again.
+//! Backs up supported live chat files and ChatVault's independent snapshots into Documents, and restores them again.
 //! Restoring never overwrites a file that already exists.
 
 use crate::paths::*;
@@ -58,6 +58,11 @@ fn pairs(forward: bool) -> Vec<(PathBuf, PathBuf)> {
     // (live root, backup root, filter: 0 = everything, 1 = Claude transcripts only, 2 = Cursor transcripts only, 3 = Gemini chats, 4 = OpenCode database)
     let mut maps: Vec<(PathBuf, PathBuf, u8)> = Vec::new();
     let on = crate::integrations::is_enabled;
+    // Provider-independent snapshots are always safe to copy both ways: they belong to ChatVault,
+    // not to a live tool database, and restoring them never writes into another application.
+    if let Some(p) = crate::archive::root() {
+        maps.push((p, b.join("archive"), 0));
+    }
     if let (true, Some(p)) = (on("claude"), claude_projects()) {
         maps.push((p, b.join("claude").join("projects"), 1));
     }

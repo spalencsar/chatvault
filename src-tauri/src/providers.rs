@@ -1,9 +1,9 @@
 //! Parsers that turn one transcript line into displayable messages, for Claude Code and Codex.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Msg {
     pub role: String,
     pub ts: String,
