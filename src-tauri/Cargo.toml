@@ -29,6 +29,12 @@ tauri-plugin-process = "2.4.0"
 zstd = "0.14.3"
 tauri-plugin-dialog = "2.8.3"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Tauri enables tray-icon's legacy AppIndicator backend. Enabling KSNI on the
+# same crate selects the native StatusNotifierItem backend instead and avoids
+# loading the deprecated libayatana-appindicator compatibility library.
+tray-icon = { version = "0.25", default-features = false, features = ["ksni"] }
+
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

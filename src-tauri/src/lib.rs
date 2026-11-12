@@ -1458,6 +1458,25 @@ async fn backup_status() -> Result<sync::BackupStatus, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Answer command-line queries before any GUI backend is touched. tao calls
+    // gtk_init() while building the event loop and aborts the process when no
+    // display socket is reachable (headless shell, CI, agent sandbox), which
+    // turned a harmless `--version` probe into a SIGABRT core dump.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("chatvault {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "chatvault {}\n\nUsage: chatvault [--version] [--help]\n\n\
+             Local-first desktop workspace for AI conversation history.\n\
+             Without flags the desktop application starts.",
+            env!("CARGO_PKG_VERSION")
+        );
+        return;
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())

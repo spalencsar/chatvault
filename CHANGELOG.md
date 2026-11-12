@@ -24,6 +24,13 @@
 
 - Detect source-database removal independently from newer transcript files so
   ChatVault can activate its managed archive fallback without an app restart
+- Use the native KSNI/StatusNotifierItem tray backend on Linux instead of
+  loading the deprecated `libayatana-appindicator` compatibility library
+- `--version` and `--help` are now answered on the command line instead of
+  starting the desktop application. Previously both flags built the GUI event
+  loop, so an invocation without a reachable display socket (headless shell, CI,
+  agent sandbox) aborted the process through `gtk_init` and produced a SIGABRT
+  core dump
 
 ## 0.6.1 - 2026-10-22
 
