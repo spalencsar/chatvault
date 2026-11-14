@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Fixed
+
+- Read conversations written by OpenCode's current `session_v2` and
+  `session_message` database schema while retaining compatibility with legacy
+  sessions
+
 ## 0.6.2 - 2026-11-12
 
 ### Added

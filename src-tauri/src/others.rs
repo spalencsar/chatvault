@@ -7,6 +7,7 @@ use crate::paths::*;
 use crate::providers::{clip, Msg};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -206,27 +207,57 @@ fn opencode_dbs() -> Vec<PathBuf> {
 fn scan_opencode(out: &mut Vec<OtherChat>) {
     for db in opencode_dbs() { scan_opencode_db(&db,out); }
 }
+
+fn table_exists(c: &Connection, table: &str) -> bool {
+    c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+        [table],
+        |r| r.get(0),
+    )
+    .unwrap_or(false)
+}
+
 fn scan_opencode_db(db:&Path,out:&mut Vec<OtherChat>) {
     let Some(c) = open_ro(&db) else { return };
-    let Ok(mut st) = c.prepare("SELECT s.id, s.title, s.directory, s.time_created, s.time_updated, (SELECT COUNT(*) FROM message m WHERE m.session_id=s.id) FROM session s") else { return };
-    let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?)));
-    let Ok(rows) = rows else { return };
-    for (id, title, dir, created, updated, n) in rows.flatten() {
-        if n == 0 {
-            continue;
+    let mut seen = HashSet::new();
+    let schemas = [
+        ("session_v2", "session_message", "s.model"),
+        ("session", "message", "NULL"),
+    ];
+    for (sessions, messages, model) in schemas {
+        if !table_exists(&c, sessions) || !table_exists(&c, messages) { continue; }
+        let sql = format!(
+            "SELECT s.id, s.title, s.directory, s.time_created, s.time_updated, \
+             (SELECT COUNT(*) FROM {messages} m WHERE m.session_id=s.id), {model} \
+             FROM {sessions} s"
+        );
+        let Ok(mut st) = c.prepare(&sql) else { continue };
+        let rows = st.query_map([], |r| Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, i64>(3)?,
+            r.get::<_, i64>(4)?,
+            r.get::<_, i64>(5)?,
+            r.get::<_, Option<String>>(6)?,
+        )));
+        let Ok(rows) = rows else { continue };
+        for (id, title, dir, created, updated, n, model) in rows.flatten() {
+            if n == 0 || !seen.insert(id.clone()) { continue; }
+            let title = title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| "OpenCode chat".into());
+            out.push(OtherChat {
+                provider: "opencode",
+                id: id.clone(),
+                title: clip(title.trim(), 80),
+                cwd: dir.filter(|d| d != "/" && !d.is_empty()),
+                created_ms: Some(created),
+                last_ms: updated.max(created),
+                size: n * 2000,
+                path: format!("opencode:{}|{}", db.display(), id),
+                model,
+                account: None,
+            });
         }
-        out.push(OtherChat {
-            provider: "opencode",
-            id: id.clone(),
-            title: clip(title.trim(), 80),
-            cwd: dir.filter(|d| d != "/" && !d.is_empty()),
-            created_ms: Some(created),
-            last_ms: updated.max(created),
-            size: n * 2000,
-            path: format!("opencode:{}|{}", db.display(), id),
-            model: None,
-            account: None,
-        });
     }
 }
 
@@ -236,7 +267,71 @@ fn opencode_messages(key: &str) -> Vec<Msg> {
         if !opencode_dbs().contains(&db) {return Vec::new();}
         (db,id)
     } else { let Some(db)=opencode_db() else{return Vec::new()};(db,key) };
-    let Some(c) = open_ro(&db) else { return Vec::new() };
+    opencode_messages_db(&db, id)
+}
+
+fn opencode_messages_db(db: &Path, id: &str) -> Vec<Msg> {
+    let Some(c) = open_ro(db) else { return Vec::new() };
+    if table_exists(&c, "session_message") {
+        let Ok(mut st) = c.prepare("SELECT type, time_created, data FROM session_message WHERE session_id=?1 ORDER BY seq, time_created") else { return Vec::new() };
+        let rows: Vec<(String, i64, String)> = st.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map(|r| r.flatten().collect()).unwrap_or_default();
+        if !rows.is_empty() {
+            return opencode_v2_messages(rows);
+        }
+    }
+    opencode_legacy_messages(&c, id)
+}
+
+fn opencode_v2_messages(rows: Vec<(String, i64, String)>) -> Vec<Msg> {
+    let mut out = Vec::new();
+    for (kind, created, data) in rows {
+        let Ok(message) = serde_json::from_str::<Value>(&data) else { continue };
+        let ts = chrono::DateTime::from_timestamp_millis(created).map(|d| d.to_rfc3339()).unwrap_or_default();
+        if kind == "user" {
+            let text = message.get("text").and_then(Value::as_str).unwrap_or("");
+            if !text.trim().is_empty() { out.push(Msg::new("user", &ts, text.into(), "text")); }
+            continue;
+        }
+        if kind != "assistant" { continue; }
+        for part in message.get("content").and_then(Value::as_array).cloned().unwrap_or_default() {
+            match part.get("type").and_then(Value::as_str).unwrap_or("") {
+                "text" => {
+                    let text = part.get("text").and_then(Value::as_str).unwrap_or("");
+                    if !text.trim().is_empty() { out.push(Msg::new("assistant", &ts, text.into(), "text")); }
+                }
+                "reasoning" => {
+                    let text = part.get("text").and_then(Value::as_str).unwrap_or("");
+                    if !text.trim().is_empty() { out.push(Msg::new("assistant", &ts, clip(text, 6000), "reasoning")); }
+                }
+                "tool" => {
+                    let name = part.get("name").and_then(Value::as_str).unwrap_or("tool").to_string();
+                    let call_id = part.get("id").and_then(Value::as_str).map(String::from);
+                    let mut tool = Msg::new("assistant", &ts, format!("{name}:"), "tool");
+                    tool.name = Some(name);
+                    tool.id = call_id.clone();
+                    tool.data = part.get("state").and_then(|s| s.get("input")).cloned();
+                    out.push(tool);
+                    let state = part.get("state");
+                    let result = state
+                        .and_then(|s| s.get("metadata"))
+                        .and_then(|m| ["output", "preview", "diff"].into_iter().find_map(|k| m.get(k).and_then(Value::as_str)))
+                        .or_else(|| state.and_then(|s| s.get("error")).and_then(|e| e.get("message")).and_then(Value::as_str));
+                    if let Some(text) = result.filter(|t| !t.trim().is_empty()) {
+                        let mut msg = Msg::new("assistant", &ts, clip(text, 8000), "result");
+                        msg.id = call_id;
+                        msg.error = state.and_then(|s| s.get("error")).map(|_| true);
+                        out.push(msg);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+fn opencode_legacy_messages(c: &Connection, id: &str) -> Vec<Msg> {
+    if !table_exists(c, "message") || !table_exists(c, "part") { return Vec::new(); }
     let Ok(mut st) = c.prepare("SELECT m.id, m.time_created, m.data FROM message m WHERE m.session_id=?1 ORDER BY m.time_created") else { return Vec::new() };
     let msgs: Vec<(String, i64, String)> = st.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map(|r| r.flatten().collect()).unwrap_or_default();
     let mut out = Vec::new();
@@ -323,7 +418,14 @@ pub fn cline_chat_files() -> Vec<PathBuf> {
 /// How many chats an OpenCode database holds.
 pub fn opencode_chat_count(db: &Path) -> Option<usize> {
     let c = open_ro(db)?;
-    c.query_row("SELECT COUNT(*) FROM session", [], |r| r.get::<_, i64>(0)).ok().map(|n| n as usize)
+    let mut ids = HashSet::new();
+    for table in ["session_v2", "session"] {
+        if !table_exists(&c, table) { continue; }
+        let mut st = c.prepare(&format!("SELECT id FROM {table}")).ok()?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0)).ok()?;
+        ids.extend(rows.flatten());
+    }
+    Some(ids.len())
 }
 
 fn cline_sessions() -> Vec<PathBuf> {
@@ -552,6 +654,70 @@ pub fn real_file(path: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn current_opencode_schema_scans_and_reads_sessions() {
+        let db = crate::cli::script_file("").unwrap().with_extension("opencode-v2.db");
+        let c = Connection::open(&db).unwrap();
+        c.execute_batch(
+            "CREATE TABLE session_v2(
+                id TEXT PRIMARY KEY, title TEXT, directory TEXT, model TEXT,
+                time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL
+             );
+             CREATE TABLE session_message(
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL,
+                seq INTEGER NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL
+             );
+             CREATE TABLE session(
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, directory TEXT,
+                time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL
+             );
+             CREATE TABLE message(
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL, data TEXT NOT NULL
+             );
+             CREATE TABLE part(
+                id TEXT PRIMARY KEY, message_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL, data TEXT NOT NULL
+             );",
+        ).unwrap();
+        c.execute(
+            "INSERT INTO session_v2 VALUES(?1,?2,?3,?4,?5,?6)",
+            rusqlite::params!["session-new", "Current OpenCode chat", "/tmp/project", "provider/model", 1_700_000_000_000_i64, 1_700_000_002_000_i64],
+        ).unwrap();
+        let user = serde_json::json!({"text":"fixture question","time":{"created":1_700_000_000_000_i64}}).to_string();
+        let assistant = serde_json::json!({
+            "content":[
+                {"type":"reasoning","text":"fixture thought"},
+                {"type":"text","text":"fixture answer"},
+                {"type":"tool","id":"call-1","name":"shell","state":{"input":{"command":"true"},"metadata":{"output":"fixture output"}}}
+            ],
+            "time":{"created":1_700_000_001_000_i64,"completed":1_700_000_002_000_i64}
+        }).to_string();
+        c.execute("INSERT INTO session_message VALUES('m1','session-new','user',1,?1,?2)", rusqlite::params![1_700_000_000_000_i64,user]).unwrap();
+        c.execute("INSERT INTO session_message VALUES('m2','session-new','assistant',2,?1,?2)", rusqlite::params![1_700_000_001_000_i64,assistant]).unwrap();
+        c.execute("INSERT INTO session VALUES('session-old','Legacy chat','/tmp/legacy',1,2)", []).unwrap();
+        c.execute("INSERT INTO message VALUES('old-message','session-old',1,?1)", [serde_json::json!({"role":"user"}).to_string()]).unwrap();
+        c.execute("INSERT INTO part VALUES('old-part','old-message',1,?1)", [serde_json::json!({"type":"text","text":"legacy question"}).to_string()]).unwrap();
+        drop(c);
+
+        let mut chats = Vec::new();
+        scan_opencode_db(&db, &mut chats);
+        assert_eq!(chats.len(), 2);
+        let current = chats.iter().find(|chat| chat.id == "session-new").unwrap();
+        assert_eq!(current.model.as_deref(), Some("provider/model"));
+        assert_eq!(opencode_chat_count(&db), Some(2));
+
+        let messages = opencode_messages_db(&db, "session-new");
+        assert!(messages.iter().any(|m| m.role == "user" && m.text == "fixture question"));
+        assert!(messages.iter().any(|m| m.kind == "text" && m.text == "fixture answer"));
+        assert!(messages.iter().any(|m| m.kind == "reasoning" && m.text == "fixture thought"));
+        assert!(messages.iter().any(|m| m.kind == "tool" && m.name.as_deref() == Some("shell")));
+        assert!(messages.iter().any(|m| m.kind == "result" && m.text == "fixture output"));
+        let legacy = opencode_messages_db(&db, "session-old");
+        assert!(legacy.iter().any(|m| m.role == "user" && m.text == "legacy question"));
+        let _ = fs::remove_file(db);
+    }
+
     #[test]
     fn extension_and_cli_cline_transcripts_both_parse() {
         let sample=serde_json::json!([{"role":"user","content":[{"type":"text","text":"fixture question"}]},{"role":"assistant","content":[{"type":"text","text":"fixture answer"}]}]);

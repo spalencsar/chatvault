@@ -442,7 +442,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
     }
     let result = (|| {
         let mut c = open_db()?;
-        let source_upgrade = c.query_row("SELECT value FROM source_state WHERE name='local_sources'",[],|r|r.get::<_,String>(0)).ok().as_deref()!=Some("9");
+        let source_upgrade = c.query_row("SELECT value FROM source_state WHERE name='local_sources'",[],|r|r.get::<_,String>(0)).ok().as_deref()!=Some("10");
         // Rows saved with a raw encoded folder name are rebuilt once so they get the readable project name.
         let _ = c.execute("DELETE FROM chats WHERE provider='claude' AND project LIKE 'C--%'", []);
         // Chats without desktop-app records are rebuilt once so they pick up the folder found in the transcript.
@@ -660,7 +660,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
             tx.commit().map_err(|e| e.to_string())?;
         }
         if let Some(a) = app { let _ = a.emit("index-progress", Progress { phase: "Done".into(), done: total, total }); }
-        c.execute("INSERT OR REPLACE INTO source_state(name,value) VALUES('local_sources','9')",[]).map_err(|e|e.to_string())?;
+        c.execute("INSERT OR REPLACE INTO source_state(name,value) VALUES('local_sources','10')",[]).map_err(|e|e.to_string())?;
         Ok(())
     })();
     REFRESHING.store(false, Ordering::SeqCst);
