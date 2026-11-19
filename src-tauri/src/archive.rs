@@ -183,7 +183,7 @@ mod tests {
             title: "Saved conversation".into(), account: "local".into(), project: "Demo".into(),
             cwd: Some("/tmp/demo".into()), created_ms: Some(1), last_ms: 2, archived: false,
             size: 3, path: "antigravity-db:source|id".into(), model: None, has_metadata: true,
-            backup: false, user_archived: false,
+            backup: false, user_archived: false, preview: "hello".into(),
         }
     }
 

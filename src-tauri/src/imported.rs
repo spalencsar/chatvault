@@ -574,6 +574,7 @@ pub fn scan(out: &mut Vec<OtherChat>) {
             continue;
         }
         let last = parsed.last_ms.unwrap_or_else(|| mtime(&p));
+        let preview = parsed.messages.iter().find(|m| m.role == "user").map(|m| clip(m.text.trim(), 200));
         out.push(OtherChat {
             provider: "imported",
             id,
@@ -585,6 +586,7 @@ pub fn scan(out: &mut Vec<OtherChat>) {
             path: format!("imported:{}", p.to_string_lossy()),
             model: parsed.model,
             account: Some(parsed.platform),
+            preview,
         });
     }
 }

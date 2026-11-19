@@ -48,12 +48,12 @@ function MarkdownImpl({ source, q, active, breaks }: { source: string; q: string
       const t = text(children);
       if (isFilePath(t)) {
         return (
-          <button type="button" onClick={() => files.open(t)} className="cursor-pointer rounded bg-muted px-1 py-0.5 text-left font-mono text-[0.85em] underline decoration-dotted decoration-muted-foreground/60 underline-offset-2 hover:bg-accent hover:decoration-solid">
+          <button type="button" onClick={() => files.open(t)} className="cursor-pointer rounded-md border border-border bg-muted/80 px-1.5 py-0.5 text-left font-mono text-[0.85em] text-foreground underline decoration-dotted decoration-muted-foreground/60 underline-offset-2 hover:bg-muted hover:decoration-solid dark:border-white/10 dark:bg-[#202327] dark:hover:bg-[#2a2e33]">
             {hl(children)}
           </button>
         );
       }
-      return <code className="rounded bg-muted px-1 py-0.5 font-mono text-[0.85em] [pre_&]:bg-transparent [pre_&]:p-0">{hl(children)}</code>;
+      return <code className="rounded-md border border-border bg-muted/80 px-1.5 py-0.5 font-mono text-[0.85em] text-foreground dark:border-white/10 dark:bg-[#202327] [pre_&]:border-0 [pre_&]:bg-transparent [pre_&]:p-0">{hl(children)}</code>;
     },
     pre: ({ children }) => <pre className="my-2 overflow-auto rounded-md bg-muted p-3 font-mono text-xs">{children}</pre>,
     table: ({ children }) => (

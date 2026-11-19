@@ -52,7 +52,7 @@ function Lines({ entries, onError }: { entries: Entry[]; onError: (e: unknown) =
                 {e.icon}
                 {e.label}
               </ContextMenuSubTrigger>
-              <ContextMenuSubContent className="w-52">
+              <ContextMenuSubContent className="w-60">
                 <Lines entries={e.entries} onError={onError} />
               </ContextMenuSubContent>
             </ContextMenuSub>
@@ -106,7 +106,7 @@ export function ContextArea({
         {children}
       </ContextMenuTrigger>
       {tidy(list).length > 0 && (
-        <ContextMenuContent className="w-56">
+        <ContextMenuContent className="w-64">
           <Lines entries={list} onError={onError ?? (() => {})} />
         </ContextMenuContent>
       )}

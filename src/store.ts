@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 export const AUTO_SYNC_KEY = "chatvault.autoSync";
+export const AUTO_SYNC_INTERVAL_KEY = "chatvault.autoSyncInterval";
 
 /** State that survives closing and reopening the app. */
 export function usePersisted<T>(key: string, initial: T) {

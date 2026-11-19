@@ -191,6 +191,7 @@ pub fn scan(out: &mut Vec<OtherChat>) {
             .and_then(ms_of)
             .unwrap_or_else(|| mtime(&p));
         let model = summary.as_ref().and_then(|s| s.get("current_model_id")).and_then(|t| t.as_str()).map(String::from);
+        let preview = msgs.iter().find(|m| m.role == "user").map(|m| clip(m.text.trim(), 200));
         out.push(OtherChat {
             provider: "grok",
             id,
@@ -202,6 +203,7 @@ pub fn scan(out: &mut Vec<OtherChat>) {
             path: format!("grok:{}", p.to_string_lossy()),
             model,
             account: None,
+            preview,
         });
     }
 }

@@ -72,6 +72,8 @@ export type Chat = {
   hasMetadata: boolean;
   backup: boolean;
   userArchived?: boolean;
+  /** First message of the conversation, indexed for the card preview. */
+  preview?: string;
 };
 export type Msg = {
   role: "user" | "assistant";
@@ -353,7 +355,7 @@ export const loadAll = (chat: Chat) => invoke<Msg[]>("read_chat_all", { provider
  * Saves what a new AI reads. A short chat goes in whole. A long one gets a compact briefing plus the complete conversation
  * as a second, searchable file, so the AI starts fast and can still look up anything that was said.
  */
-async function prepareHandoff(chat: Chat) {
+export async function prepareHandoff(chat: Chat) {
   const msgs = await loadAll(chat);
   const fullPath = handoffIsCondensed(msgs) ? await invoke<string>("save_handoff", { title: `full ${chat.title}`, content: toMarkdown(chat, msgs) }) : undefined;
   return invoke<string>("save_handoff", { title: chat.title, content: buildHandoff(chat, msgs, fullPath) });

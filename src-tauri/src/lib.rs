@@ -101,12 +101,23 @@ async fn refresh_index(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn query_chats(provider: String, account: Option<String>, q: String, offset: i64, limit: i64, sort: Option<String>, scope: Option<String>) -> Result<Page, String> {
+async fn query_chats(provider: String, account: Option<String>, q: String, offset: i64, limit: i64, sort: Option<String>, scope: Option<String>, project: Option<String>, cwd: Option<String>) -> Result<Page, String> {
     // "all" lists the chats of every tool together.
     if provider != "all" {
         provider_ok(&provider)?;
     }
-    tauri::async_runtime::spawn_blocking(move || index::query(&provider, account, &q, offset, limit.clamp(1, 200), sort.as_deref().unwrap_or("recent"), scope.as_deref().unwrap_or("all")))
+    tauri::async_runtime::spawn_blocking(move || index::query(&provider, account, &q, offset, limit.clamp(1, 200), sort.as_deref().unwrap_or("recent"), scope.as_deref().unwrap_or("all"), project.as_deref(), cwd.as_deref()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The nav column: one workspace per project folder, with how many chats it holds.
+#[tauri::command]
+async fn workspaces(provider: String, scope: Option<String>) -> Result<Vec<index::Workspace>, String> {
+    if provider != "all" {
+        provider_ok(&provider)?;
+    }
+    tauri::async_runtime::spawn_blocking(move || index::workspaces(&provider, scope.as_deref().unwrap_or("all")))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -1058,9 +1069,7 @@ struct ExportDone {
 
 const EXPORT_TOOLS: [(&str, &str); 10] = [("claude", "Claude Code"), ("codex", "Codex"), ("cursor", "Cursor"), ("gemini", "Gemini CLI"), ("opencode", "OpenCode"), ("cline", "Cline"), ("grok", "Grok"), ("hermes", "Hermes Agent"), ("antigravity", "Antigravity"), ("imported", "Imported")];
 
-/// Reads one chat and returns its Markdown, or None when it has nothing readable. File names depend only on the chat, so
-/// exporting again to the same folder replaces the earlier files instead of piling up copies.
-fn chat_markdown(tool: &str, tool_name: &str, id: &str, path: &str) -> Option<(String, String)> {
+fn read_chat_export_messages(tool: &str, path: &str) -> Option<Vec<Msg>> {
     let msgs: Vec<Msg> = if is_virtual(tool, path) {
         read_virtual(tool, path).unwrap_or_default().into_iter().filter(is_readable).collect()
     } else {
@@ -1077,8 +1086,16 @@ fn chat_markdown(tool: &str, tool_name: &str, id: &str, path: &str) -> Option<(S
         out
     };
     if msgs.is_empty() {
-        return None;
+        None
+    } else {
+        Some(msgs)
     }
+}
+
+/// Reads one chat and returns its Markdown, or None when it has nothing readable. File names depend only on the chat, so
+/// exporting again to the same folder replaces the earlier files instead of piling up copies.
+fn chat_markdown(tool: &str, tool_name: &str, id: &str, path: &str) -> Option<(String, String)> {
+    let msgs = read_chat_export_messages(tool, path)?;
     let title = msgs.iter().find(|m| m.role == "user").map(|m| clip(m.text.lines().next().unwrap_or("Chat").trim(), 60)).unwrap_or_else(|| "Chat".into());
     let safe: String = title.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' { c } else { '_' }).collect();
     let mut md = format!("# {}\n\n- Tool: {}\n- Chat id: {}\n\n", title, tool_name, id);
@@ -1091,10 +1108,25 @@ fn chat_markdown(tool: &str, tool_name: &str, id: &str, path: &str) -> Option<(S
     Some((format!("{}-{:08x}.md", safe.trim().trim_end_matches('…'), short), md))
 }
 
-/// Starts saving every chat as a Markdown file in the chosen folder, one subfolder per tool, and returns at once. The work
-/// runs on its own thread and reports through `export-progress` and `export-done`, so the window never waits for it.
-#[tauri::command]
-fn export_all_markdown(app: AppHandle, folder: String) -> Result<(), String> {
+fn chat_json(tool: &str, tool_name: &str, id: &str, path: &str) -> Option<(String, String)> {
+    let msgs = read_chat_export_messages(tool, path)?;
+    let title = msgs.iter().find(|m| m.role == "user").map(|m| clip(m.text.lines().next().unwrap_or("Chat").trim(), 60)).unwrap_or_else(|| "Chat".into());
+    let safe: String = title.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' { c } else { '_' }).collect();
+    let short = id.bytes().fold(0x811c9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+    let filename = format!("{}-{:08x}.json", safe.trim().trim_end_matches('…'), short);
+    let payload = serde_json::json!({
+        "id": id,
+        "tool": tool,
+        "toolName": tool_name,
+        "title": title,
+        "messageCount": msgs.len(),
+        "messages": msgs,
+    });
+    let content = serde_json::to_string_pretty(&payload).ok()?;
+    Some((filename, content))
+}
+
+fn export_all_chats(app: AppHandle, folder: String, format: &'static str) -> Result<(), String> {
     use std::sync::atomic::Ordering;
     use tauri::Emitter;
     let root = PathBuf::from(&folder);
@@ -1118,13 +1150,17 @@ fn export_all_markdown(app: AppHandle, folder: String) -> Result<(), String> {
             let mut last_emit = std::time::Instant::now() - std::time::Duration::from_secs(1);
             let _ = app.emit("export-progress", ExportProgress { done: 0, total, current: String::new() });
             for (i, (tool, name, id, path)) in jobs.iter().enumerate() {
-                match chat_markdown(tool, name, id, path) {
-                    Some((file, md)) => {
+                let file_res = if format == "json" {
+                    chat_json(tool, name, id, path)
+                } else {
+                    chat_markdown(tool, name, id, path)
+                };
+                match file_res {
+                    Some((file, content)) => {
                         let dir = root.join(name);
                         let target = dir.join(&file);
                         let temp = dir.join(format!("{}.tmp", file));
-                        // Written to a temporary file first, so an interrupted export never leaves a half file behind.
-                        if fs::create_dir_all(&dir).is_ok() && fs::write(&temp, md).is_ok() && fs::rename(&temp, &target).is_ok() {
+                        if fs::create_dir_all(&dir).is_ok() && fs::write(&temp, content).is_ok() && fs::rename(&temp, &target).is_ok() {
                             written += 1;
                         } else {
                             let _ = fs::remove_file(&temp);
@@ -1150,6 +1186,18 @@ fn export_all_markdown(app: AppHandle, folder: String) -> Result<(), String> {
         let _ = app.emit("export-done", done);
     });
     Ok(())
+}
+
+/// Starts saving every chat as a Markdown file in the chosen folder, one subfolder per tool, and returns at once.
+#[tauri::command]
+fn export_all_markdown(app: AppHandle, folder: String) -> Result<(), String> {
+    export_all_chats(app, folder, "markdown")
+}
+
+/// Starts saving every chat as a structured JSON file in the chosen folder, one subfolder per tool, and returns at once.
+#[tauri::command]
+fn export_all_json(app: AppHandle, folder: String) -> Result<(), String> {
+    export_all_chats(app, folder, "json")
 }
 
 fn file_stem_of(path: &str) -> String {
@@ -1385,6 +1433,14 @@ fn account_info() -> Vec<AccountInfo> {
         .collect()
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveResult {
+    pub files: usize,
+    pub bytes: u64,
+    pub path: String,
+}
+
 #[tauri::command]
 async fn sync_chats(app: AppHandle) -> Result<sync::SyncStats, String> {
     tauri::async_runtime::spawn_blocking(move || sync::backup(&app)).await.map_err(|e| e.to_string())?
@@ -1393,6 +1449,26 @@ async fn sync_chats(app: AppHandle) -> Result<sync::SyncStats, String> {
 #[tauri::command]
 async fn restore_chats(app: AppHandle) -> Result<sync::SyncStats, String> {
     tauri::async_runtime::spawn_blocking(move || sync::restore(&app)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn restore_selected_chats(app: AppHandle, sources: Option<Vec<String>>) -> Result<sync::SyncStats, String> {
+    tauri::async_runtime::spawn_blocking(move || sync::restore_selected(&app, sources)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn preview_restore_chats() -> Result<sync::RestorePreview, String> {
+    tauri::async_runtime::spawn_blocking(sync::preview_restore).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn create_backup_tarball(archive_path: String) -> Result<ArchiveResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (files, bytes) = sync::create_tarball(Path::new(&archive_path))?;
+        Ok(ArchiveResult { files, bytes, path: archive_path })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1548,6 +1624,7 @@ pub fn run() {
             import_chats,
             refresh_index,
             query_chats,
+            workspaces,
             provider_overview,
             chats_by_ids,
             overview_stats,
@@ -1561,6 +1638,7 @@ pub fn run() {
             send_message,
             write_text_file,
             export_all_markdown,
+            export_all_json,
             export_running,
             write_image_file,
             set_chat_archived,
@@ -1596,6 +1674,9 @@ pub fn run() {
             account_info,
             sync_chats,
             restore_chats,
+            restore_selected_chats,
+            preview_restore_chats,
+            create_backup_tarball,
             backup_status,
             chat_sources,
             open_chat_source,
@@ -1630,13 +1711,13 @@ mod tests {
             println!("{prov}: {} chats, accounts {:?}", o.total, o.accounts.iter().map(|a| (a.id.chars().take(8).collect::<String>(), a.count)).collect::<Vec<_>>());
             assert!(o.total > 0, "{prov} has chats");
             let t = Instant::now();
-            let page = index::query(prov, None, "", 0, 20, "recent", "all").unwrap();
+            let page = index::query(prov, None, "", 0, 20, "recent", "all", None, None).unwrap();
             println!("  page of {} in {:?}, first: {:?}", page.items.len(), t.elapsed(), page.items.first().map(|c| c.title.clone()));
-            let page = index::query(prov, None, "fuel", 0, 5, "recent", "all").unwrap();
+            let page = index::query(prov, None, "fuel", 0, 5, "recent", "all", None, None).unwrap();
             println!("  search 'fuel': {} total", page.total);
         }
         // The biggest codex rollout must still page quickly.
-        let big = index::query("codex", None, "", 0, 200, "recent", "all").unwrap().items.into_iter().max_by_key(|c| c.size).unwrap();
+        let big = index::query("codex", None, "", 0, 200, "recent", "all", None, None).unwrap().items.into_iter().max_by_key(|c| c.size).unwrap();
         println!("biggest codex chat: {} ({} MB)", big.title, big.size / 1_000_000);
         let t = Instant::now();
         let mut n = 0;

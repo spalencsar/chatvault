@@ -66,6 +66,18 @@ export function CursorLogo({ className }: { className?: string }) {
   );
 }
 
+/** The ChatVault mark: a gold isometric cube inside a hexagon. */
+export function VaultLogo({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 100 100" className={className} aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="7" strokeLinejoin="round" strokeLinecap="round">
+      <path d="M50 6 88 28v44L50 94 12 72V28z" />
+      <path d="M50 6 12 28l38 22 38-22z" />
+      <path d="M50 50v44M50 50 12 28M50 50l38-22" />
+      <path d="M58 74 74 65" strokeWidth="6" />
+    </svg>
+  );
+}
+
 /** The ChatVault app icon: a chat bubble with three dots. */
 export function AppLogo({ className }: { className?: string }) {
   return (

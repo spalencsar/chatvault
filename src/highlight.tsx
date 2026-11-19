@@ -44,8 +44,10 @@ export function Highlight({ text, q, activeMark }: { text: string; q: string; ac
           <mark
             key={i}
             className={cn(
-              "rounded-[3px] px-0.5 text-foreground [box-decoration-break:clone]",
-              activeMark && i === 1 ? "bg-amber-300 dark:bg-amber-400/50" : "bg-yellow-200/70 dark:bg-yellow-400/25",
+              "rounded-[3px] px-1 font-medium [box-decoration-break:clone] transition-colors",
+              activeMark && i === 1
+                ? "bg-amber-400 text-amber-950 shadow-[0_0_10px_rgba(245,158,11,0.5)] dark:bg-[#f0a83c] dark:text-[#18120c] dark:shadow-[0_0_10px_rgba(240,168,60,0.6)]"
+                : "bg-amber-200/80 text-amber-950 dark:bg-amber-500/25 dark:text-amber-200",
             )}
           >
             {p}

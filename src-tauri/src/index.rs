@@ -37,6 +37,10 @@ pub struct ChatSummary {
     pub backup: bool,
     /// Moved to the archive inside ChatVault. Nothing outside ChatVault changes.
     pub user_archived: bool,
+    /// First user text of the conversation, for the card in the browser column. Empty when the index has none yet.
+    /// Snapshots written before this field existed still load.
+    #[serde(default)]
+    pub preview: String,
 }
 
 #[derive(Serialize)]
@@ -66,10 +70,8 @@ struct Progress {
     total: usize,
 }
 
-pub fn open_db() -> Result<Connection, String> {
-    let dir = data_dir().ok_or("No data folder")?;
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let c = Connection::open(dir.join("index.db")).map_err(|e| e.to_string())?;
+/// The tables and indexes every connection needs. Split out of [`open_db`] so tests can build the same database in memory.
+fn schema(c: &Connection) -> Result<(), String> {
     c.execute_batch(
         "PRAGMA journal_mode=WAL;
          PRAGMA synchronous=NORMAL;
@@ -91,7 +93,14 @@ pub fn open_db() -> Result<Connection, String> {
          CREATE UNIQUE INDEX IF NOT EXISTS chats_path ON chats(path);
          CREATE VIRTUAL TABLE IF NOT EXISTS chats_fts USING fts5(key UNINDEXED, title, project, preview);",
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())
+}
+
+pub fn open_db() -> Result<Connection, String> {
+    let dir = data_dir().ok_or("No data folder")?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let c = Connection::open(dir.join("index.db")).map_err(|e| e.to_string())?;
+    schema(&c)?;
     Ok(c)
 }
 
@@ -316,6 +325,7 @@ fn build_row(
                     has_metadata: true,
                     backup: f.backup,
                     user_archived: false,
+                    preview: preview.clone().unwrap_or_default(),
                 },
                 mtime,
                 preview: preview.unwrap_or_default(),
@@ -340,7 +350,8 @@ fn build_row(
                 model: None,
                 has_metadata: false,
                 backup: f.backup,
-                    user_archived: false,
+                user_archived: false,
+                preview: preview.clone().unwrap_or_default(),
             },
             mtime,
             preview: preview.unwrap_or_default(),
@@ -385,7 +396,8 @@ fn build_row(
             model: p.get("model_provider").and_then(|x| x.as_str()).map(String::from),
             has_metadata: true,
             backup: f.backup,
-                    user_archived: false,
+            user_archived: false,
+            preview: preview.clone().unwrap_or_default(),
         },
         mtime,
         preview: preview.unwrap_or_default(),
@@ -442,7 +454,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
     }
     let result = (|| {
         let mut c = open_db()?;
-        let source_upgrade = c.query_row("SELECT value FROM source_state WHERE name='local_sources'",[],|r|r.get::<_,String>(0)).ok().as_deref()!=Some("10");
+        let source_upgrade = c.query_row("SELECT value FROM source_state WHERE name='local_sources'",[],|r|r.get::<_,String>(0)).ok().as_deref()!=Some("11");
         // Rows saved with a raw encoded folder name are rebuilt once so they get the readable project name.
         let _ = c.execute("DELETE FROM chats WHERE provider='claude' AND project LIKE 'C--%'", []);
         // Chats without desktop-app records are rebuilt once so they pick up the folder found in the transcript.
@@ -550,7 +562,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
             if !source_upgrade && known.get(&ch.path)==Some(&(0,ch.updated)) {continue;}
             let row = Row { s: ChatSummary { provider:"codex".into(),id:ch.id,local_id:None,title:ch.title.clone(),account:ch.account,
                 project:project_of(&ch.cwd,"Codex"),cwd:ch.cwd,created_ms:Some(ch.created),last_ms:ch.updated,archived:ch.archived,
-                size:0,path:ch.path,model:ch.model,has_metadata:true,backup:false,user_archived:false }, mtime:ch.updated,preview:ch.title };
+                size:0,path:ch.path,model:ch.model,has_metadata:true,backup:false,user_archived:false,preview:ch.title.clone() }, mtime:ch.updated,preview:ch.title };
             let _ = upsert(&tx,&row,true);
         }
         tx.commit().map_err(|e|e.to_string())?;
@@ -575,6 +587,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
                 let _ = tx.execute(&format!("DELETE FROM chats_fts WHERE key IN (SELECT provider||':'||id FROM chats WHERE provider IN ({}))", crate::others::SQL_IN), []);
                 let _ = tx.execute(&format!("DELETE FROM chats WHERE provider IN ({})", crate::others::SQL_IN), []);
                 for ch in chats {
+                    let preview = ch.preview.unwrap_or_else(|| ch.title.clone());
                     let row = Row {
                         s: ChatSummary {
                             provider: ch.provider.into(),
@@ -599,9 +612,10 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
                             has_metadata: true,
                             backup: false,
                             user_archived: false,
+                            preview: preview.clone(),
                         },
                         mtime: ofp,
-                        preview: ch.title,
+                        preview,
                     };
                     let _ = upsert(&tx, &row, true);
                 }
@@ -636,6 +650,7 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
                         has_metadata: true,
                         backup: false,
                         user_archived: false,
+                        preview: ch.title.clone(),
                     },
                     mtime: fp,
                     preview: ch.title,
@@ -654,13 +669,13 @@ pub fn refresh(app: Option<&AppHandle>) -> Result<(), String> {
                     .unwrap_or(false);
                 if exists { continue; }
                 let title = archived.chat.title.clone();
-                let row = Row { s: archived.chat, mtime: archived.mtime, preview: title };
+                let row = Row { s: { let mut s = archived.chat; s.preview = title.clone(); s }, mtime: archived.mtime, preview: title };
                 let _ = upsert(&tx, &row, true);
             }
             tx.commit().map_err(|e| e.to_string())?;
         }
         if let Some(a) = app { let _ = a.emit("index-progress", Progress { phase: "Done".into(), done: total, total }); }
-        c.execute("INSERT OR REPLACE INTO source_state(name,value) VALUES('local_sources','10')",[]).map_err(|e|e.to_string())?;
+        c.execute("INSERT OR REPLACE INTO source_state(name,value) VALUES('local_sources','11')",[]).map_err(|e|e.to_string())?;
         Ok(())
     })();
     REFRESHING.store(false, Ordering::SeqCst);
@@ -698,52 +713,109 @@ fn row_to_summary(r: &rusqlite::Row) -> rusqlite::Result<ChatSummary> {
         has_metadata: r.get::<_, i64>(13)? != 0,
         backup: r.get::<_, i64>(14)? != 0,
         user_archived: r.get::<_, i64>(15)? != 0,
+        preview: r.get::<_, String>(16).unwrap_or_default(),
     })
 }
 
-const COLS: &str = "provider,id,local_id,title,account,project,cwd,created_ms,last_ms,archived,size,path,model,has_meta,backup,EXISTS(SELECT 1 FROM user_archive u WHERE u.provider=chats.provider AND u.id=chats.id)";
-const COLS_C: &str = "c.provider,c.id,c.local_id,c.title,c.account,c.project,c.cwd,c.created_ms,c.last_ms,c.archived,c.size,c.path,c.model,c.has_meta,c.backup,EXISTS(SELECT 1 FROM user_archive u WHERE u.provider=c.provider AND u.id=c.id)";
+const COLS: &str = "provider,id,local_id,title,account,project,cwd,created_ms,last_ms,archived,size,path,model,has_meta,backup,EXISTS(SELECT 1 FROM user_archive u WHERE u.provider=chats.provider AND u.id=chats.id),(SELECT preview FROM chats_fts WHERE key = chats.provider||':'||chats.id)";
+const COLS_C: &str = "c.provider,c.id,c.local_id,c.title,c.account,c.project,c.cwd,c.created_ms,c.last_ms,c.archived,c.size,c.path,c.model,c.has_meta,c.backup,EXISTS(SELECT 1 FROM user_archive u WHERE u.provider=c.provider AND u.id=c.id),(SELECT preview FROM chats_fts WHERE key = c.provider||':'||c.id)";
 
-pub fn query(provider: &str, account: Option<String>, q: &str, offset: i64, limit: i64, sort: &str, scope: &str) -> Result<Page, String> {
-    let c = open_db()?;
+/// The `AND …` that narrows a list to one scope: live on this PC, in the backup, archived, or one tag.
+/// Empty for the default list, which leaves out chats you archived inside ChatVault.
+fn scope_sql(scope: &str) -> String {
+    match scope {
+        "live" => " AND backup=0 AND NOT (archived=1 OR (provider||':'||id) IN (SELECT provider||':'||id FROM user_archive))".into(),
+        // Every chat that has a copy in the backup folder, whether or not the original still exists.
+        "backup" => " AND (backup=1 OR (provider||':'||id) IN (SELECT provider||':'||id FROM backed_up))".into(),
+        "archived" => " AND (archived=1 OR (provider||':'||id) IN (SELECT provider||':'||id FROM user_archive))".into(),
+        t if t.starts_with("tag:") => {
+            let tag: String = t[4..].chars().filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-').collect();
+            format!(" AND (provider||':'||id) IN (SELECT provider||':'||id FROM chat_tags WHERE tag='{}')", tag.replace('\'', ""))
+        }
+        // The normal lists leave out chats you archived in ChatVault.
+        _ => " AND (provider||':'||id) NOT IN (SELECT provider||':'||id FROM user_archive)".into(),
+    }
+}
+
+pub fn query(provider: &str, account: Option<String>, q: &str, offset: i64, limit: i64, sort: &str, scope: &str, project: Option<&str>, cwd: Option<&str>) -> Result<Page, String> {
+    query_in(&open_db()?, provider, account, q, offset, limit, sort, scope, project, cwd)
+}
+
+fn query_in(c: &Connection, provider: &str, account: Option<String>, q: &str, offset: i64, limit: i64, sort: &str, scope: &str, project: Option<&str>, cwd: Option<&str>) -> Result<Page, String> {
     let acct = account.filter(|a| a != "all");
     let like = format!("%{}%", q.trim().replace('%', "").replace('_', ""));
     let fts = fts_expr(q);
-    let tag_sql: String;
-    let scope_sql = match scope {
-        "live" => " AND backup=0 AND NOT (archived=1 OR (provider||':'||id) IN (SELECT provider||':'||id FROM user_archive))",
-        // Every chat that has a copy in the backup folder, whether or not the original still exists.
-        "backup" => " AND (backup=1 OR (provider||':'||id) IN (SELECT provider||':'||id FROM backed_up))",
-        "archived" => " AND (archived=1 OR (provider||':'||id) IN (SELECT provider||':'||id FROM user_archive))",
-        t if t.starts_with("tag:") => {
-            let tag: String = t[4..].chars().filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-').collect();
-            tag_sql = format!(" AND (provider||':'||id) IN (SELECT provider||':'||id FROM chat_tags WHERE tag='{}')", tag.replace('\'', ""));
-            tag_sql.as_str()
-        }
-        // The normal lists leave out chats you archived in ChatVault.
-        _ => " AND (provider||':'||id) NOT IN (SELECT provider||':'||id FROM user_archive)",
-    };
+    let scope_sql = scope_sql(scope);
+    let project = project.filter(|p| !p.is_empty()).map(|p| p.to_string());
+    // The same folder name can exist in several places, so a workspace narrows to the folder as well.
+    let cwd = cwd.filter(|p| !p.is_empty()).map(|p| p.to_string());
     let order_sql = match sort {
         "oldest" => "last_ms ASC",
         "title" => "title COLLATE NOCASE ASC",
         "size" => "size DESC",
         _ => "last_ms DESC",
     };
-    let where_sql = format!("(?1='all' OR provider=?1) AND (?2 IS NULL OR account=?2) AND (?3 = '' OR title LIKE ?4 OR project LIKE ?4 OR (provider||':'||id) IN (SELECT key FROM chats_fts WHERE chats_fts MATCH ?5)){scope_sql}");
+    // ?6 narrows to one workspace, ?7 to its folder; both statements below share the same numbering.
+    let where_sql = format!("(?1='all' OR provider=?1) AND (?2 IS NULL OR account=?2) AND (?3 = '' OR title LIKE ?4 OR project LIKE ?4 OR (provider||':'||id) IN (SELECT key FROM chats_fts WHERE chats_fts MATCH ?5)) AND (?6 IS NULL OR project=?6) AND (?7 IS NULL OR cwd=?7){scope_sql}");
     let fts_param = fts.unwrap_or_else(|| "\"\"".into());
     let trimmed = q.trim().to_string();
     let total: i64 = c
-        .query_row(&format!("SELECT COUNT(*) FROM chats WHERE {where_sql}"), params![provider, acct, trimmed, like, fts_param], |r| r.get(0))
+        .query_row(&format!("SELECT COUNT(*) FROM chats WHERE {where_sql}"), params![provider, acct, trimmed, like, fts_param, project, cwd], |r| r.get(0))
         .map_err(|e| e.to_string())?;
     let mut st = c
-        .prepare(&format!("SELECT {COLS} FROM chats WHERE {where_sql} ORDER BY {order_sql} LIMIT ?6 OFFSET ?7"))
+        .prepare(&format!("SELECT {COLS} FROM chats WHERE {where_sql} ORDER BY {order_sql} LIMIT ?8 OFFSET ?9"))
         .map_err(|e| e.to_string())?;
     let items = st
-        .query_map(params![provider, acct, trimmed, like, fts_param, limit, offset], row_to_summary)
+        .query_map(params![provider, acct, trimmed, like, fts_param, project, cwd, limit, offset], row_to_summary)
         .map_err(|e| e.to_string())?
         .flatten()
         .collect();
     Ok(Page { items, total })
+}
+
+/// One workspace (a project folder) and how many chats it holds, for the nav column.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Workspace {
+    /// What the chat rows carry, used as the filter value.
+    pub project: String,
+    pub count: i64,
+    /// The folder itself, so the browser column can show a path under the workspace name.
+    pub cwd: Option<String>,
+}
+
+/// Every workspace with its count, newest activity first. `provider` and `scope` narrow it the same way the list does,
+/// so a workspace only offers chats that clicking it would actually show. One row is one real folder: the same
+/// folder name in different places stays separate, and chats without a folder are left out.
+pub fn workspaces(provider: &str, scope: &str) -> Result<Vec<Workspace>, String> {
+    workspaces_in(&open_db()?, provider, scope)
+}
+
+fn workspaces_in(c: &Connection, provider: &str, scope: &str) -> Result<Vec<Workspace>, String> {
+    let scope_sql = scope_sql(scope);
+    // Newest first, then fold: the first row of a workspace carries the folder of its newest chat.
+    // Chats without a folder are skipped: their project name is a fallback (the tool name), not a workspace.
+    // The same folder name in different places stays apart, because a workspace is one real folder.
+    let mut st = c
+        .prepare(&format!(
+            "SELECT project, cwd, last_ms FROM chats
+             WHERE (?1='all' OR provider=?1) AND cwd IS NOT NULL{scope_sql}
+             ORDER BY last_ms DESC"
+        ))
+        .map_err(|e| e.to_string())?;
+    let mut by_folder: std::collections::HashMap<(String, String), Workspace> = std::collections::HashMap::new();
+    let mut order: Vec<(String, String)> = Vec::new();
+    let rows = st.query_map(params![provider], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map_err(|e| e.to_string())?;
+    for (project, cwd) in rows.flatten() {
+        match by_folder.get_mut(&(project.clone(), cwd.clone())) {
+            Some(w) => w.count += 1,
+            None => {
+                order.push((project.clone(), cwd.clone()));
+                by_folder.insert((project.clone(), cwd.clone()), Workspace { project, count: 1, cwd: Some(cwd) });
+            }
+        }
+    }
+    Ok(order.into_iter().filter_map(|k| by_folder.remove(&k)).collect())
 }
 
 pub fn overview(provider: &str) -> Result<Overview, String> {
@@ -853,7 +925,7 @@ pub fn index_bodies(app: Option<&AppHandle>) -> Result<(), String> {
                      ORDER BY c.last_ms DESC"),
                 )
                 .map_err(|e| e.to_string())?;
-            let rows = st.query_map([], |r| Ok((row_to_summary(r)?, r.get(16)?))).map_err(|e| e.to_string())?;
+            let rows = st.query_map([], |r| Ok((row_to_summary(r)?, r.get(17)?))).map_err(|e| e.to_string())?;
             rows.flatten().collect()
         };
         let total = todo.len();
@@ -1058,4 +1130,103 @@ fn chrono_now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A database in memory with the real schema, so the query and workspace SQL can be exercised without touching your index.
+    fn mem() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        schema(&c).unwrap();
+        c
+    }
+
+    /// One chat plus its search-index row, which is where the card preview comes from.
+    fn put(c: &Connection, provider: &str, id: &str, title: &str, project: &str, cwd: Option<&str>, last_ms: i64) {
+        c.execute(
+            "INSERT INTO chats(provider,id,title,account,project,cwd,last_ms,size,mtime,path)
+             VALUES(?1,?2,?3,'a',?4,?5,?6,0,?6,?7)",
+            params![provider, id, title, project, cwd, last_ms, format!("{provider}:{id}")],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO chats_fts(key,title,project,preview) VALUES(?1,?2,?3,?4)",
+            params![format!("{provider}:{id}"), title, project, format!("preview of {title}")],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_workspace_only_offers_chats_that_clicking_it_would_show() {
+        let c = mem();
+        put(&c, "claude", "1", "Alpha", "chat-vault", Some("/p/chat-vault"), 100);
+        put(&c, "claude", "2", "Beta", "chat-vault", Some("/p/chat-vault"), 300);
+        put(&c, "codex", "3", "Gamma", "bearwave", Some("/p/bearwave"), 200);
+        // The same folder name somewhere else, and a chat without a folder at all.
+        put(&c, "grok", "4", "Delta", "chat-vault", Some("/q/chat-vault"), 400);
+        put(&c, "claude", "5", "Epsilon", "ChatVault", None, 500);
+
+        // Narrowing to one tool drops that tool's workspaces instead of showing them with a count of chats you cannot open.
+        let claude = workspaces_in(&c, "claude", "all").unwrap();
+        assert_eq!(claude.iter().map(|w| w.project.as_str()).collect::<Vec<_>>(), ["chat-vault"]);
+        assert_eq!(claude[0].count, 2);
+
+        // Newest activity first, one row per real folder, and no row for a chat that has no folder.
+        let all = workspaces_in(&c, "all", "all").unwrap();
+        assert_eq!(all.iter().map(|w| w.project.as_str()).collect::<Vec<_>>(), ["chat-vault", "chat-vault", "bearwave"]);
+        assert_eq!(all.iter().map(|w| w.cwd.as_deref()).collect::<Vec<_>>(), [Some("/q/chat-vault"), Some("/p/chat-vault"), Some("/p/bearwave")]);
+        assert_eq!(all[1].count, 2);
+    }
+
+    #[test]
+    fn a_workspace_filter_counts_only_that_projects_chats() {
+        let c = mem();
+        put(&c, "claude", "1", "Alpha", "chat-vault", None, 100);
+        put(&c, "claude", "2", "Beta", "chat-vault", None, 300);
+        put(&c, "codex", "3", "Gamma", "bearwave", None, 200);
+
+        let page = query_in(&c, "all", None, "", 0, 50, "recent", "all", Some("chat-vault"), None).unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Beta", "Alpha"]);
+
+        // The search still narrows inside the workspace rather than overruling it.
+        let page = query_in(&c, "all", None, "Beta", 0, 50, "recent", "all", Some("chat-vault"), None).unwrap();
+        assert_eq!(page.total, 1);
+
+        // An unknown workspace is empty, not a fallback to everything.
+        let page = query_in(&c, "all", None, "", 0, 50, "recent", "all", Some("nowhere"), None).unwrap();
+        assert_eq!(page.total, 0);
+        assert!(page.items.is_empty());
+
+        // The same folder name in another place is reached through its own folder, not through the name alone.
+        put(&c, "codex", "4", "Delta", "chat-vault", Some("/q/chat-vault"), 400);
+        put(&c, "grok", "5", "Epsilon", "chat-vault", Some("/q/chat-vault"), 500);
+        let page = query_in(&c, "all", None, "", 0, 50, "recent", "all", Some("chat-vault"), Some("/q/chat-vault")).unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Epsilon", "Delta"]);
+
+        // Without a folder the name alone still means every folder that carries it.
+        let page = query_in(&c, "all", None, "", 0, 50, "recent", "all", Some("chat-vault"), None).unwrap();
+        assert_eq!(page.total, 4);
+
+        // No workspace keeps the old behaviour: every project together.
+        let page = query_in(&c, "all", None, "", 0, 50, "recent", "all", None, None).unwrap();
+        assert_eq!(page.total, 5);
+    }
+
+    #[test]
+    fn a_card_carries_the_preview_from_the_search_index() {
+        let c = mem();
+        put(&c, "claude", "1", "Alpha", "chat-vault", None, 100);
+        let page = query_in(&c, "all", None, "", 0, 50, "recent", "all", None, None).unwrap();
+        assert_eq!(page.items[0].preview, "preview of Alpha");
+
+        // A chat whose search row is missing still comes back, with an empty preview instead of an error.
+        c.execute("DELETE FROM chats_fts", []).unwrap();
+        let page = query_in(&c, "all", None, "", 0, 50, "recent", "all", None, None).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].preview, "");
+    }
 }

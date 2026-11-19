@@ -53,13 +53,16 @@ export function initBulkExport() {
 }
 
 /** Asks for a folder, then starts the export in the background. Files from an earlier export in that folder are replaced. */
-export async function startBulkExport() {
-  const folder = await pickFolder({ directory: true, title: "Choose a folder for the Markdown files" });
+export async function startBulkExport(format: "markdown" | "json" = "markdown") {
+  const folder = await pickFolder({
+    directory: true,
+    title: format === "json" ? "Choose a folder for JSON export files" : "Choose a folder for Markdown export files",
+  });
   if (!folder || typeof folder !== "string") return;
   try {
     set({ running: true, done: 0, total: 0, current: "" });
-    progressToast(TOAST, "Starting the export…");
-    await invoke("export_all_markdown", { folder });
+    progressToast(TOAST, `Starting the ${format === "json" ? "JSON" : "Markdown"} export…`);
+    await invoke(format === "json" ? "export_all_json" : "export_all_markdown", { folder });
   } catch (e) {
     set({ running: false });
     finishToast(TOAST, String(e).replace(/^Error:\s*/, ""), false);

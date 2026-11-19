@@ -16,11 +16,9 @@
         d.style.colorScheme = light ? "light" : "dark";
       })();
     </script>
-    <link rel="preload" href="/fonts/geist-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
     <style>
-      @font-face { font-family: "Geist Variable"; font-style: normal; font-display: swap; font-weight: 100 900; src: url("/fonts/geist-latin-wght-normal.woff2") format("woff2-variations"); }
       html, body { margin: 0; height: 100%; }
-      #boot { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; font-family: "Geist Variable", sans-serif; font-weight: 400; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; background: #0a0a0a; color: #a1a1aa; }
+      #boot { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; font-family: "Geist Variable", system-ui, sans-serif; font-weight: 400; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; background: #0a0a0a; color: #a1a1aa; }
       .light #boot, html:not(.dark) #boot { background: #ffffff; color: #71717a; }
       #boot svg { width: 64px; height: 64px; border-radius: 16px; animation: bootpulse 2s cubic-bezier(.4,0,.6,1) infinite; }
       #boot p { margin: 0; font-size: 14px; line-height: 20px; font-weight: 400; }

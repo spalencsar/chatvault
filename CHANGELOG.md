@@ -1,12 +1,23 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 - 2026-11-19
+
+### Added
+
+- **Deep Search & In-Chat jumping**: Jump directly to matching message lines with glowing amber highlights and virtualized scroll positioning when clicking search hits in the Command Palette (`Ctrl`+`K`), Deep Search, or conversation browser.
+- **Granular restore preview & selective restore**: Dry-run restore scanner (`preview_restore_chats`) comparing backups against live stores to preview missing conversations before restoring, with tool-level selection (`restore_selected_chats`).
+- **Compressed backup bundles**: One-click `.tar.gz` archive creation (`create_backup_tarball`) for durable offsite backups.
+- **Structured JSON bulk export**: Export all indexed conversations as structured JSON (`export_all_json`) alongside existing Markdown bulk exports.
+- **Sync & Backup overhaul**: Live source breakdown cards displaying file counts and storage size per tool, configurable auto-sync intervals (10m, 30m, 1h, 6h), and safe snapshot protection for SQLite-backed agents (Hermes Agent, Antigravity).
+- **Universal modern design system**: Completely overhauled Command Palette (`Ctrl`+`K`), Deep Search overlay, and all context/dropdown menus (`ContextMenu`, `DropdownMenu`) using Dark Charcoal (`#161618`), subtle borders, warm amber focus states, and consistent FontAwesome/SVG vector glyphs (`sourceGlyph()`).
 
 ### Fixed
 
-- Read conversations written by OpenCode's current `session_v2` and
-  `session_message` database schema while retaining compatibility with legacy
-  sessions
+- Eliminated WebKitGTK subpixel blur bug by replacing `translate(-50%, -50%)` with device-pixel-aligned `fixed inset-0 m-auto h-fit` across all modal dialogs.
+- Fixed search workspace leak where typing in the global TitleBar search bar from the dashboard locked searches into previously visited workspaces.
+- Fixed middle conversation list displaying "No Chats Found" when opening a full-text search result.
+- Removed redundant "Backup" tab from Settings dialog to unify all backup workflows in Sync & Backup.
+- Fixed OpenCode schema support for `session_v2` and `session_message`.
 
 ## 0.6.2 - 2026-11-12
 

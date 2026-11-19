@@ -1,10 +1,13 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { FolderOpen } from "lucide-react";
+import { sourceGlyph } from "@/source-icons";
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator, CommandShortcut } from "@/components/ui/command";
 import { ProviderLogo } from "@/claude-logo";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { PROVIDERS, PROVIDER_SHORT, type Chat, type Provider } from "@/chat-actions";
+import { Highlight } from "@/highlight";
+import { PROVIDERS, PROVIDER_SHORT, fmtDate, type Chat, type Provider } from "@/chat-actions";
 
 type Hit = { id: string; snippet: string };
 
@@ -25,7 +28,7 @@ export function CommandPalette({
   provider: Provider;
   pinned: Chat[];
   titleOf: (c: Chat) => string;
-  onOpenChat: (c: Chat) => void;
+  onOpenChat: (c: Chat, query?: string) => void;
   actions: PaletteAction[];
 }) {
   const [value, setValue] = useState("");
@@ -92,40 +95,61 @@ export function CommandPalette({
   const shownPinned = pinned.filter((c) => !q || titleOf(c).toLowerCase().includes(q));
 
   const item = (c: Chat) => (
-    <CommandItem key={`${c.provider}:${c.id}`} value={`${c.provider}:${c.id}`} onSelect={() => select(() => onOpenChat(c))}>
-      <ProviderLogo provider={c.provider} className="size-4 shrink-0" />
-      <span className="min-w-0 flex-1">
-        <span className="block truncate">{titleOf(c)}</span>
-        {q && snippets[c.id] && <span className="block truncate text-xs text-muted-foreground">{snippets[c.id].replace(/<[^>]+>/g, "")}</span>}
-      </span>
+    <CommandItem key={`${c.provider}:${c.id}`} value={`${c.provider}:${c.id}`} onSelect={() => select(() => onOpenChat(c, value.trim()))}>
+      <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-surface-muted/80 border border-white/5">
+        {sourceGlyph(c.provider, "size-4") ?? <ProviderLogo provider={c.provider} className="size-4" />}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="truncate font-medium text-foreground">{titleOf(c)}</span>
+          <span className="shrink-0 font-mono text-[11px] text-muted-foreground/70 tabular-nums">{fmtDate(c.lastMs)}</span>
+        </div>
+        <div className="flex items-center gap-2 mt-0.5 text-xs text-muted-foreground">
+          {c.project && (
+            <span className="flex items-center gap-1 text-[11px] font-mono text-muted-foreground/80">
+              <FolderOpen className="size-3 shrink-0 opacity-70" strokeWidth={1.5} />
+              <span className="max-w-[140px] truncate">{c.project}</span>
+            </span>
+          )}
+          {q && snippets[c.id] && (
+            <span className="truncate text-xs text-muted-foreground/90 font-sans">
+              <Highlight text={snippets[c.id]} q={value.trim()} activeMark={false} />
+            </span>
+          )}
+        </div>
+      </div>
     </CommandItem>
   );
 
   return (
-    <CommandDialog open={open} onOpenChange={onOpenChange} title="Search ChatVault" description="Find a chat or run an action." className="top-1/2 -translate-y-1/2 sm:max-w-xl">
+    <CommandDialog open={open} onOpenChange={onOpenChange} title="Search ChatVault" description="Find a chat or run an action.">
       <Command shouldFilter={false}>
-        <CommandInput value={value} onValueChange={setValue} placeholder="Search chats and actions…" />
-        <ScrollArea className="h-[min(420px,55dvh)]">
+        <CommandInput value={value} onValueChange={setValue} placeholder="Search chats, files, and actions…" />
+        <ScrollArea className="h-[min(460px,60dvh)]">
         <CommandList className="max-h-none overflow-visible">
           {loading && results.length === 0 && (
-            <div className="px-1 py-1" aria-busy="true">
-              <Skeleton className="mx-2.5 mb-1 mt-2 h-3 w-20" />
-              {Array.from({ length: 5 }).map((_, i) => (
-                <div key={i} className="flex items-center gap-2.5 px-2.5 py-2">
-                  <Skeleton className="size-4 shrink-0 rounded" />
-                  <Skeleton className={`h-3.5 ${["w-3/5", "w-2/3", "w-1/2", "w-3/4", "w-2/5"][i]}`} />
+            <div className="p-3 space-y-2" aria-busy="true">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div key={i} className="flex items-center gap-3 p-2 rounded-xl bg-white/5 border border-white/5">
+                  <Skeleton className="size-7 shrink-0 rounded-lg" />
+                  <div className="flex-1 space-y-1.5">
+                    <Skeleton className="h-3.5 w-1/2" />
+                    <Skeleton className="h-3 w-1/3" />
+                  </div>
                 </div>
               ))}
             </div>
           )}
-          {!loading && results.length === 0 && shownActions.length === 0 && shownPinned.length === 0 && <CommandEmpty>No results found.</CommandEmpty>}
+          {!loading && results.length === 0 && shownActions.length === 0 && shownPinned.length === 0 && (
+            <CommandEmpty className="py-12 text-center text-sm text-muted-foreground">No matches found for “{value}”.</CommandEmpty>
+          )}
           {shownPinned.length > 0 && (
             <CommandGroup heading={`Pinned · ${PROVIDER_SHORT[provider]}`}>{shownPinned.map(item)}</CommandGroup>
           )}
           {results.length > 0 && (
             <>
               {shownPinned.length > 0 && <CommandSeparator />}
-              <CommandGroup heading={q ? "Chats" : "Recent chats"}>{results.filter((c) => !shownPinned.some((p) => p.id === c.id && p.provider === c.provider)).slice(0, q ? 12 : 5).map(item)}</CommandGroup>
+              <CommandGroup heading={q ? "Conversations" : "Recent conversations"}>{results.filter((c) => !shownPinned.some((p) => p.id === c.id && p.provider === c.provider)).slice(0, q ? 12 : 6).map(item)}</CommandGroup>
             </>
           )}
           {shownActions.length > 0 && (
@@ -134,8 +158,10 @@ export function CommandPalette({
               <CommandGroup heading="Actions">
                 {shownActions.map((a) => (
                   <CommandItem key={a.id} value={a.id} onSelect={() => select(a.run)}>
-                    {a.icon}
-                    <span className="flex-1">{a.label}</span>
+                    <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-surface-muted/80 border border-white/5">
+                      {a.icon}
+                    </div>
+                    <span className="flex-1 font-medium">{a.label}</span>
                     {a.shortcut && <CommandShortcut>{a.shortcut}</CommandShortcut>}
                   </CommandItem>
                 ))}
@@ -144,10 +170,12 @@ export function CommandPalette({
           )}
         </CommandList>
         </ScrollArea>
-        <div className="flex items-center gap-3 border-t px-3 py-2 text-xs text-muted-foreground">
-          <span><kbd className="rounded border bg-muted px-1">↑</kbd> <kbd className="rounded border bg-muted px-1">↓</kbd> to move</span>
-          <span><kbd className="rounded border bg-muted px-1">Enter</kbd> to open</span>
-          <span className="ml-auto"><kbd className="rounded border bg-muted px-1">Esc</kbd> to close</span>
+        <div className="flex items-center justify-between border-t border-white/10 px-4 py-2.5 bg-black/20 text-xs text-muted-foreground">
+          <div className="flex items-center gap-3">
+            <span className="flex items-center gap-1.5"><kbd className="rounded border border-white/10 bg-white/5 px-1.5 py-0.5 text-[11px] font-mono">↑</kbd> <kbd className="rounded border border-white/10 bg-white/5 px-1.5 py-0.5 text-[11px] font-mono">↓</kbd> navigate</span>
+            <span className="flex items-center gap-1.5"><kbd className="rounded border border-white/10 bg-white/5 px-1.5 py-0.5 text-[11px] font-mono">↵</kbd> open</span>
+          </div>
+          <span className="flex items-center gap-1.5"><kbd className="rounded border border-white/10 bg-white/5 px-1.5 py-0.5 text-[11px] font-mono">Esc</kbd> close</span>
         </div>
       </Command>
     </CommandDialog>

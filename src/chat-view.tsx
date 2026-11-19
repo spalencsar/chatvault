@@ -2,11 +2,10 @@ import { FileViewContext, FileViewer, isFilePath } from "@/file-viewer";
 import { StickyOpenContext, useStickyOpen } from "@/sticky-open";
 import { ChatImage, GalleryContext, Lightbox } from "@/image-viewer";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useCallback, useEffect, useLayoutEffect, useMemo, memo, useRef, useState, type ReactElement, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, memo, useRef, useState, type ReactElement } from "react";
 import {
   ExternalLink,
   Save,
-  Settings,
   LayoutDashboard,
   RefreshCw,
   ArrowRightLeft,
@@ -19,39 +18,30 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
-  Clock,
-  Cpu,
-  HardDrive,
-  MessageSquare,
+  GitBranch,
+  MessageSquareText,
   Copy,
   FileText,
   ListTree,
   Loader2,
- 
+  Play,
   Pencil,
   Pin,
   PinOff,
-  Quote,
   Search,
   Trash2,
   User,
   X,
 } from "lucide-react";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Badge } from "@/components/ui/badge";
-import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Message, MessageAvatar, MessageContent, MessageHeader } from "@/components/ui/message";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { copyImage, downloadImage } from "@/image-viewer";
 import { ContextArea, type Entry } from "@/context-area";
-import { Toggle } from "@/components/ui/toggle";
 import { ActionIcon } from "@/action-icon";
 import { runAction } from "@/toast";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { Trace, TraceCollapsible, TraceCollapsibleContent, TraceCollapsibleTrigger, TraceDescription, TraceIcon, TraceLine, TraceTitle } from "@/components/ui/trace";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -63,9 +53,24 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { ProviderLogo, visualProvider } from "@/claude-logo";
+import { sourceGlyph } from "@/source-icons";
 import { MessageBody } from "@/message-body";
 import { Highlight, textHas } from "@/highlight";
-import { PROVIDER_SHORT, chatActions, continueTargets, COPY_CONTENT_IDS, deleteKind, fmtDate, fmtSize, prettyTitle, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
+import {
+  PROVIDER_SHORT,
+  chatActions,
+  continueTargets,
+  COPY_CONTENT_IDS,
+  deleteKind,
+  prettyTitle,
+  prepareHandoff,
+  buildPrompt,
+  type Chat,
+  type ChatAction,
+  type Msg,
+  type MsgPage,
+  type Provider,
+} from "@/chat-actions";
 import { HeaderSkeleton, MessagesSkeleton } from "@/skeletons";
 import { PlanBlock, StepItem, SubagentBlock, isAgent, isPlan, mergeResults, stepName, type Item } from "@/steps";
 
@@ -91,6 +96,7 @@ type Props = {
   onOverview?: () => void;
   /** Open the all-chats search with this word already typed. */
   onSearchAll?: (q: string) => void;
+  initialQuery?: string;
   toast: (m: string) => void;
 };
 
@@ -108,16 +114,36 @@ type Block = { kind: "msg"; i: number; m: Item } | { kind: "plan"; i: number; m:
 export function ChatView(p: Props) {
   const { chat, page } = p;
   const logoProvider = visualProvider(chat.provider, chat.account);
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [q, setQ] = useState("");
+  const [searchOpen, setSearchOpen] = useState(() => Boolean(p.initialQuery));
+  const [q, setQ] = useState(() => p.initialQuery || "");
   const [cur, setCur] = useState(0);
   const [showJump, setShowJump] = useState(false);
   const [atTop, setAtTop] = useState(true);
   const [atEnd, setAtEnd] = useState(false);
-  const [activeTick, setActiveTick] = useState(0);
   const [loadingAll, setLoadingAll] = useState(false);
   const [viewer, setViewer] = useState<number | null>(null);
   const [fileOpen, setFileOpen] = useState<string | null>(null);
+  const [composerText, setComposerText] = useState("");
+  const [handoffBusy, setHandoffBusy] = useState(false);
+
+  const handleHandoff = async () => {
+    if (handoffBusy) return;
+    setHandoffBusy(true);
+    try {
+      const handoffPath = await prepareHandoff(chat);
+      let prompt = buildPrompt(chat, handoffPath);
+      if (composerText.trim()) {
+        prompt += `\n\nAdditional user instructions:\n${composerText.trim()}`;
+      }
+      await navigator.clipboard.writeText(prompt);
+      p.toast("Handoff prompt copied to clipboard");
+      setComposerText("");
+    } catch (e) {
+      p.toast(`Handoff failed: ${e}`);
+    } finally {
+      setHandoffBusy(false);
+    }
+  };
   // Full paths the chat itself mentions. A short path like src/app.tsx is looked up under the folders they point into,
   // so it still opens when the chat worked on a project other than its own folder.
   const fileHints = useMemo(() => {
@@ -312,9 +338,15 @@ export function ChatView(p: Props) {
   }, []);
 
   useEffect(() => {
-    setSearchOpen(false);
-    setQ("");
-  }, [chat.id, viewport]);
+    if (p.initialQuery) {
+      setSearchOpen(true);
+      setQ(p.initialQuery);
+      setCur(0);
+    } else {
+      setSearchOpen(false);
+      setQ("");
+    }
+  }, [chat.id, p.initialQuery]);
 
   const live = useRef({ start: 0, loading: false, partial: false, loadEarlier: p.onLoadEarlier });
   live.current = { start: page?.start ?? 0, loading: p.loadingEarlier, partial: !!page?.partial, loadEarlier: p.onLoadEarlier };
@@ -331,20 +363,6 @@ export function ChatView(p: Props) {
         setShowJump(el.scrollHeight - el.scrollTop - el.clientHeight > 400);
         setAtTop(el.scrollTop < 8);
         setAtEnd(el.scrollHeight - el.scrollTop - el.clientHeight < 8);
-        const line = el.scrollTop + 120;
-        // Ticks are in page order, so a binary search over the row positions finds the current one.
-        let lo = 0;
-        let hi = ticks.length - 1;
-        let active = 0;
-        while (lo <= hi) {
-          const mid = (lo + hi) >> 1;
-          const row = virt.measurementsCache[blockOf[ticks[mid].i]];
-          if (row && row.start <= line) {
-            active = mid;
-            lo = mid + 1;
-          } else hi = mid - 1;
-        }
-        setActiveTick(active);
       });
     };
     onScroll();
@@ -353,7 +371,7 @@ export function ChatView(p: Props) {
       el.removeEventListener("scroll", onScroll);
       cancelAnimationFrame(raf);
     };
-  }, [viewport, ticks, page, virt, blockOf, margin]);
+  }, [viewport, page, virt, margin]);
 
 
   const loadAll = async () => {
@@ -390,8 +408,6 @@ export function ChatView(p: Props) {
     });
     return out;
   }, [ticks, p.outline]);
-  const step = Math.max(1, Math.ceil(barTicks.length / 60));
-  const sampled = barTicks.filter((t, n) => n % step === 0 || (t.loaded && t.k === activeTick));
   /** The first message of the chat: reads every earlier message first when only the latest are loaded. */
   const goToFirst = async () => {
     firstRequested.current = true;
@@ -533,78 +549,46 @@ export function ChatView(p: Props) {
       {!page ? (
         <HeaderSkeleton />
       ) : (
-        <header className="border-b py-3">
-          <div className="w-full space-y-3 px-4">
-          <div className="flex items-center gap-3">
-            <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-muted">
-              <ProviderLogo provider={chat.provider} className="size-6" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="group/title flex items-center gap-1">
-                <h2 className="truncate text-[13px] font-medium leading-tight">{prettyTitle(chat.title)}</h2>
-                {p.live && (
-                  <Tip label={`${PROVIDER_SHORT[chat.provider]} is working in this chat right now`}>
-                    <span className="relative ml-1 flex size-2 shrink-0">
-                      <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-                      <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
-                    </span>
-                  </Tip>
-                )}
-                <Tip label="Rename this chat in ChatVault.">
-                  <Button variant="ghost" size="icon" className="size-6 shrink-0 text-muted-foreground opacity-0 group-hover/title:opacity-100 focus-visible:opacity-100" aria-label="Rename" onClick={p.onRename}>
-                    <Pencil className="size-3.5" />
-                  </Button>
+        <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-background/95 backdrop-blur px-4 sm:px-6 dark:border-white/[0.08] dark:bg-[#141618]">
+          {/* Breadcrumb Navigation matching Mockup: Workspace (Amber) / Conversation Title */}
+          <div className="mr-3 flex min-w-0 flex-1 items-center gap-2 text-[14px]">
+            <span
+              onClick={p.onOverview}
+              className={cn(
+                "max-w-[120px] shrink-0 truncate font-medium text-amber-700 transition-colors sm:max-w-[200px] dark:text-[#f0a83c]",
+                p.onOverview && "cursor-pointer hover:underline"
+              )}
+            >
+              {chat.project ? chat.project : "ChatVault"}
+            </span>
+            <span className="shrink-0 text-muted-foreground/40">/</span>
+            <div className="group/title flex min-w-0 flex-1 items-center gap-1.5">
+              <h2 className="truncate font-sans font-medium text-foreground">
+                {prettyTitle(chat.title)}
+              </h2>
+              {p.live && (
+                <Tip label={`${PROVIDER_SHORT[chat.provider]} is working in this chat right now`}>
+                  <span className="relative flex size-2 shrink-0">
+                    <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                    <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
+                  </span>
                 </Tip>
-              </div>
-              <div className="mt-1 flex flex-wrap items-center gap-1">
-                {[
-                  chat.model ? { icon: Cpu, label: chat.model } : null,
-                  chat.backup ? { icon: Archive, label: "Backup copy" } : null,
-                  { icon: Clock, label: fmtDate(chat.lastMs) },
-                  { icon: HardDrive, label: chat.path.startsWith("codex-db:") ? "Database storage" : fmtSize(chat.size) },
-                  { icon: MessageSquare, label: page.partial ? "Loading transcript…" : `${page.total.toLocaleString()} transcript entries` },
-                ]
-                  .filter((m): m is { icon: typeof Cpu; label: string } => m !== null)
-                  .map((m) => (
-                    <Badge key={m.label} variant="secondary" className="h-5 gap-1 rounded-md px-1.5 text-[11px] font-normal text-muted-foreground">
-                      <m.icon className="size-3" strokeWidth={1.5} />
-                      {m.label}
-                    </Badge>
-                  ))}
-              </div>
-            </div>
-            <div className="flex shrink-0 items-center gap-1">
-              <Tip label={p.pinned ? "Unpin" : "Pin"}>
-                <Toggle aria-label="Pin" size="sm" pressed={p.pinned} onPressedChange={p.onTogglePin}>
-                  {p.pinned ? <PinOff /> : <Pin />}
-                </Toggle>
-              </Tip>
-              <Tip label="Search in this chat (Ctrl+F)">
-                <Toggle
-                  aria-label="Search in chat"
-                  size="sm"
-                  pressed={searchOpen}
-                  onPressedChange={(v) => {
-                    setSearchOpen(v);
-                    if (v) window.setTimeout(() => searchRef.current?.focus(), 0);
-                  }}
-                >
-                  <Search />
-                </Toggle>
-              </Tip>
-              <Tip label={p.showSteps ? "Hide the steps the AI took" : "Show the steps the AI took"}>
-                <Toggle aria-label="Show steps" size="sm" pressed={p.showSteps} onPressedChange={p.onToggleSteps}>
-                  <ListTree />
-                </Toggle>
-              </Tip>
-            </div>
-            <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-              <ExportMenu kind="copy" chat={chat} msgs={page.messages} toast={p.toast} />
-              <ExportMenu kind="save" chat={chat} msgs={page.messages} toast={p.toast} />
-              <ActionsMenu chat={chat} msgs={page.messages} toast={p.toast} onRename={p.onRename} onDelete={p.onDelete} pinned={p.pinned} onTogglePin={p.onTogglePin} onArchive={p.onArchive} />
+              )}
+              <button
+                type="button"
+                className="cursor-pointer p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover/title:opacity-100"
+                aria-label="Rename"
+                onClick={p.onRename}
+              >
+                <Pencil className="size-3" />
+              </button>
             </div>
           </div>
 
+          {/* Right Header Controls matching Mockup: [ ↑ Export ] and [ ▷ Continue in... ▾ ] */}
+          <div className="flex shrink-0 items-center gap-2">
+            <ExportDropdown chat={chat} msgs={page.messages} toast={p.toast} />
+            <ContinueMenu chat={chat} msgs={page.messages} toast={p.toast} />
           </div>
         </header>
       )}
@@ -660,17 +644,36 @@ export function ChatView(p: Props) {
                 {virt.getVirtualItems().map((vi) => {
                   const b = blocks[vi.index];
                   if (!b) return null;
+                  const isUser = b.kind === "msg" && b.m.role === "user";
+
+                  if (isUser) {
+                    return (
+                      <div key={vi.key} data-index={vi.index} ref={virt.measureElement} className="absolute left-0 top-0 w-full pb-4" style={{ transform: `translateY(${vi.start - margin}px)` }}>
+                        <UserRow m={b.m} q={query} isCurrentMatch={matchIndex >= 0 && matches[matchIndex] === b.i} rowKey={String(vi.key)} />
+                      </div>
+                    );
+                  }
+
+                  const prev = blocks[vi.index - 1];
+                  const isFirstInTurn = vi.index === 0 || (prev?.kind === "msg" && prev.m.role === "user");
+                  const time = isFirstInTurn ? getTurnTime(vi.index, blocks) : "";
+
                   return (
-                    <div key={vi.key} data-index={vi.index} ref={virt.measureElement} className="absolute left-0 top-0 w-full pb-7" style={{ transform: `translateY(${vi.start - margin}px)` }}>
-                      {b.kind === "plan" ? (
-                        <PlanBlock item={b.m} memoKey={String(vi.key)} />
-                      ) : b.kind === "agent" ? (
-                        <SubagentBlock item={b.m} memoKey={String(vi.key)} />
-                      ) : b.kind === "trace" ? (
-                        <StepsTrace items={b.items} q={query} rowKey={String(vi.key)} />
-                      ) : (
-                        <MessageRow m={b.m} provider={logoProvider} q={query} isCurrentMatch={matchIndex >= 0 && matches[matchIndex] === b.i} toast={p.toast} rowKey={String(vi.key)} />
+                    <div key={vi.key} data-index={vi.index} ref={virt.measureElement} className="absolute left-0 top-0 w-full pb-3" style={{ transform: `translateY(${vi.start - margin}px)` }}>
+                      {isFirstInTurn && (
+                        <AssistantTurnHeader provider={logoProvider} time={time} />
                       )}
+                      <div className="ml-[13px] border-l-2 border-[#a3e635] pl-4">
+                        {b.kind === "plan" ? (
+                          <div className="my-1"><PlanBlock item={b.m} memoKey={String(vi.key)} /></div>
+                        ) : b.kind === "agent" ? (
+                          <div className="my-1"><SubagentBlock item={b.m} memoKey={String(vi.key)} /></div>
+                        ) : b.kind === "trace" ? (
+                          <StepsTrace items={b.items} q={query} rowKey={String(vi.key)} />
+                        ) : (
+                          <AssistantMessage m={b.m} q={query} isCurrentMatch={matchIndex >= 0 && matches[matchIndex] === b.i} rowKey={String(vi.key)} />
+                        )}
+                      </div>
                     </div>
                   );
                 })}
@@ -694,25 +697,6 @@ export function ChatView(p: Props) {
           )}
         </ScrollArea>
 
-        {page && sampled.length >= 3 && (
-          <ConversationBar
-            ticks={sampled.map((t, n) => ({ i: n, text: t.text, ts: t.ts ?? "", active: t.loaded && t.k === activeTick }))}
-            onNear={(n) => {
-              const t = sampled[n];
-              if (t && !t.loaded && p.onLoadUntil && t.ts) void p.onLoadUntil(t.ts);
-            }}
-            onPick={(n) => {
-              const t = sampled[n];
-              if (!t) return;
-              if (t.loaded) goTo(t.i, "start", true);
-              else if (p.onLoadUntil && t.ts) {
-                pending.current = t.key;
-                void p.onLoadUntil(t.ts);
-              }
-            }}
-          />
-        )}
-
         <div className={cn("pointer-events-none absolute inset-x-0 top-0 z-10 h-12 bg-gradient-to-b from-background via-background/70 to-transparent transition-opacity duration-200", atTop ? "opacity-0" : "opacity-100")} />
         <div className={cn("pointer-events-none absolute inset-x-0 bottom-0 z-10 h-20 bg-gradient-to-t from-background via-background/70 to-transparent transition-opacity duration-200", atEnd ? "opacity-0" : "opacity-100")} />
 
@@ -727,6 +711,39 @@ export function ChatView(p: Props) {
           </Button>
         )}
       </div>
+
+      {/* Bottom Composer directly inside the chat window matching Mockup */}
+      <div className="shrink-0 pb-5 pt-2">
+        <div className="mx-auto max-w-3xl px-4">
+          <div className="flex items-center gap-2.5 rounded-2xl border border-border bg-muted/50 p-2 shadow-xs transition-colors dark:border-white/10 dark:bg-[#16181b]">
+            <div className="flex h-10 flex-1 items-center gap-2.5 rounded-xl border border-border bg-card px-3.5 shadow-xs transition-colors focus-within:border-ring dark:border-white/[0.08] dark:bg-[#1f2227] dark:focus-within:border-white/20">
+              <GitBranch className="size-4 shrink-0 text-muted-foreground" />
+              <input
+                type="text"
+                placeholder="Continue this conversation in another agent…"
+                value={composerText}
+                onChange={(e) => setComposerText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    void handleHandoff();
+                  }
+                }}
+                className="flex-1 bg-transparent text-[13px] text-foreground placeholder:text-muted-foreground/60 focus:outline-none font-sans"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleHandoff()}
+              disabled={handoffBusy}
+              className="flex h-10 shrink-0 cursor-pointer items-center gap-2 rounded-xl bg-[#f0a83c] px-4 text-[13px] font-semibold text-[#120d04] transition-colors hover:bg-[#f5b85a] disabled:opacity-50 font-sans"
+            >
+              {handoffBusy ? <Loader2 className="size-3.5 animate-spin" /> : null}
+              Create handoff
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
       <FileViewer path={fileOpen} base={chat.cwd ?? null} hints={fileHints} onClose={() => setFileOpen(null)} />
     </ContextArea>
@@ -737,153 +754,293 @@ export function ChatView(p: Props) {
 }
 
 
-/** Copying and saving the conversation itself: as Markdown, with its ID, as a file. Kept apart from the AI hand-off and the chat actions. */
-function ExportMenu({ kind, chat, msgs, toast }: { kind: "copy" | "save"; chat: Chat; msgs: Msg[]; toast: (m: string) => void }) {
+/** Continue in... button matching Mockup [ ▷ Continue in... ▾ ] */
+function ContinueMenu({ chat, msgs, toast }: { chat: Chat; msgs: Msg[]; toast: (m: string) => void }) {
+  const all = chatActions(chat, toast, msgs);
+  const targets = continueTargets(all);
+  const promptAction = all.find((a) => a.id === "copy-prompt");
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <button
+            type="button"
+            className="flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-lg border border-border bg-card px-3 py-1.5 text-[13px] font-medium text-foreground shadow-xs transition-colors hover:bg-muted dark:border-white/10 dark:bg-[#1a1c1e] dark:hover:bg-[#25282c]"
+          >
+            <Play className="size-3 fill-current text-muted-foreground" />
+            <span>Continue in…</span>
+            <ChevronDown className="size-3 opacity-60" />
+          </button>
+        }
+      />
+      <DropdownMenuContent
+        align="end"
+        sideOffset={8}
+        className="w-56 rounded-xl border border-border bg-popover p-1.5 shadow-xl text-popover-foreground dark:border-white/10 dark:bg-[#16181a] dark:text-foreground"
+      >
+        {targets.length > 0 && (
+          <DropdownMenuGroup>
+            <DropdownMenuLabel className="px-2 py-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              Launch in tool
+            </DropdownMenuLabel>
+            {targets.map((a) => (
+              <DropdownMenuItem
+                key={a.id}
+                onClick={() => void runAction(a.label, a.run)}
+                className="cursor-pointer gap-2.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors focus:bg-muted focus:text-foreground dark:focus:bg-[#25282c] dark:focus:text-[#f0a83c]"
+              >
+                <span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground">
+                  {sourceGlyph(a.logo, "size-4") ?? <ActionIcon action={a} className="size-4" />}
+                </span>
+                <span>{a.label.replace(/^Continue in /, "")}</span>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuGroup>
+        )}
+        {promptAction && (
+          <>
+            <DropdownMenuSeparator className="my-1 bg-border dark:bg-white/[0.08]" />
+            <DropdownMenuItem
+              onClick={() => void runAction(promptAction.label, promptAction.run)}
+              className="cursor-pointer gap-2.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors focus:bg-muted focus:text-foreground dark:focus:bg-[#25282c] dark:focus:text-[#f0a83c]"
+            >
+              <MessageSquareText className="size-4 shrink-0 text-muted-foreground" />
+              <span>Copy handoff prompt</span>
+            </DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** Export dropdown matching Mockup [ ↑ Export ] */
+function ExportDropdown({ chat, msgs, toast }: { chat: Chat; msgs: Msg[]; toast: (m: string) => void }) {
   const all = chatActions(chat, toast, msgs);
   const isCommand = (a: ChatAction) => a.group === "Copy" && a.id.startsWith("copy-") && !COPY_CONTENT_IDS.includes(a.id);
-  const sections = (
-    kind === "copy"
-      ? [
-          { title: "Copy this chat", items: [...all.filter((a) => a.group === "Copy" && !isCommand(a)), ...all.filter((a) => a.id === "fork")] },
-          { title: "Copy the command to start", items: all.filter(isCommand) },
-        ]
-      : [{ title: "Save this chat", items: all.filter((a) => a.group === "Save") }]
-  ).filter((x) => x.items.length);
-  if (!sections.length) return null;
+  const copies = all.filter((a) => a.group === "Copy" && !isCommand(a));
+  const saves = all.filter((a) => a.group === "Save");
+  const commands = all.filter(isCommand);
+
   return (
     <DropdownMenu>
-      <Tooltip>
-        <TooltipTrigger render={<DropdownMenuTrigger render={<Button size="icon-sm" variant="outline" aria-label={kind === "copy" ? "Copy" : "Save"} />} />}>
-          {kind === "copy" ? <Copy className="size-4" strokeWidth={1.5} /> : <Save className="size-4" strokeWidth={1.5} />}
-        </TooltipTrigger>
-        <TooltipContent>{kind === "copy" ? "Copy" : "Save"}</TooltipContent>
-      </Tooltip>
-      <DropdownMenuContent align="end" className="w-56">
-        {sections.map((sec, i) => (
-          <div key={sec.title}>
-            {i > 0 && <DropdownMenuSeparator />}
+      <DropdownMenuTrigger
+        render={
+          <button
+            type="button"
+            className="flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-lg border border-border bg-card px-3 py-1.5 text-[13px] font-medium text-foreground shadow-xs transition-colors hover:bg-muted dark:border-white/10 dark:bg-[#1a1c1e] dark:hover:bg-[#25282c]"
+          >
+            <ArrowUp className="size-3.5 text-muted-foreground" />
+            <span>Export</span>
+          </button>
+        }
+      />
+      <DropdownMenuContent
+        align="end"
+        sideOffset={8}
+        className="w-56 rounded-xl border border-border bg-popover p-1.5 shadow-xl text-popover-foreground dark:border-white/10 dark:bg-[#16181a] dark:text-foreground"
+      >
+        {copies.length > 0 && (
+          <DropdownMenuGroup>
+            <DropdownMenuLabel className="px-2 py-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              Copy Content
+            </DropdownMenuLabel>
+            {copies.map((a) => (
+              <DropdownMenuItem
+                key={a.id}
+                onClick={() => void runAction(a.label, a.run)}
+                className="cursor-pointer gap-2.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors focus:bg-muted focus:text-foreground dark:focus:bg-[#25282c] dark:focus:text-[#f0a83c]"
+              >
+                <a.icon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} />
+                <span>{a.label}</span>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuGroup>
+        )}
+        {saves.length > 0 && (
+          <>
+            <DropdownMenuSeparator className="my-1 bg-border dark:bg-white/[0.08]" />
             <DropdownMenuGroup>
-              <DropdownMenuLabel>{sec.title}</DropdownMenuLabel>
-              {sec.items.map((a) => {
-                const Icon = a.icon;
-                return (
-                  <DropdownMenuItem key={a.id} onClick={() => void runAction(a.label, a.run)}>
-                    <Icon className="size-4" strokeWidth={1.5} /> {sec.title.startsWith("Copy the command") ? a.label.replace(/^Copy /, "").replace(/ command$/, "") : a.label}
-                  </DropdownMenuItem>
-                );
-              })}
+              <DropdownMenuLabel className="px-2 py-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                Save File
+              </DropdownMenuLabel>
+              {saves.map((a) => (
+                <DropdownMenuItem
+                  key={a.id}
+                  onClick={() => void runAction(a.label, a.run)}
+                  className="cursor-pointer gap-2.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors focus:bg-muted focus:text-foreground dark:focus:bg-[#25282c] dark:focus:text-[#f0a83c]"
+                >
+                  <a.icon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} />
+                  <span>{a.label}</span>
+                </DropdownMenuItem>
+              ))}
             </DropdownMenuGroup>
-          </div>
-        ))}
+          </>
+        )}
+        {commands.length > 0 && (
+          <>
+            <DropdownMenuSeparator className="my-1 bg-border dark:bg-white/[0.08]" />
+            <DropdownMenuGroup>
+              <DropdownMenuLabel className="px-2 py-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                CLI Command
+              </DropdownMenuLabel>
+              {commands.map((a) => (
+                <DropdownMenuItem
+                  key={a.id}
+                  onClick={() => void runAction(a.label, a.run)}
+                  className="cursor-pointer gap-2.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors focus:bg-muted focus:text-foreground dark:focus:bg-[#25282c] dark:focus:text-[#f0a83c]"
+                >
+                  <a.icon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} />
+                  <span>{a.label.replace(/^Copy /, "").replace(/ command$/, "")}</span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuGroup>
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );
 }
 
-/** One primary button for everything you do with the chat itself: continue it in a tool, keep it tidy, find its files, delete it. */
-function ActionsMenu({ chat, msgs, toast, onRename, onDelete, pinned, onTogglePin, onArchive }: { chat: Chat; msgs: Msg[]; toast: (m: string) => void; onRename: () => void; onDelete: () => void; pinned: boolean; onTogglePin: () => void; onArchive?: () => void }) {
-  const all = chatActions(chat, toast, msgs);
-  const tools = continueTargets(all);
-  const open = all.filter((a) => a.group === "Open");
-  const row = (a: ChatAction, label?: string) => {
-    return (
-      <DropdownMenuItem key={a.id} onClick={() => void runAction(a.label, a.run)}>
-        <ActionIcon action={a} className="size-4" /> {label ?? a.label}
-      </DropdownMenuItem>
-    );
-  };
+function formatMsgTime(ts?: string): string {
+  if (!ts) return "";
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return "";
+  const now = new Date();
+  const isToday = d.toDateString() === now.toDateString();
+  const timeStr = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (isToday) return `Today · ${timeStr}`;
+  const yesterday = new Date();
+  yesterday.setDate(now.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) return `Yesterday · ${timeStr}`;
+  const dateStr = d.toLocaleDateString([], { day: "numeric", month: "short" });
+  return `${dateStr} · ${timeStr}`;
+}
+
+function getTurnTime(idx: number, blocksList: Block[]): string {
+  for (let curr = idx; curr < blocksList.length; curr++) {
+    const blk = blocksList[curr];
+    if (blk.kind === "msg" && blk.m.role === "user") break;
+    const ts = blk.kind === "trace" ? blk.items[0]?.m.ts : blk.m.ts;
+    if (ts) return formatMsgTime(ts);
+  }
+  return "";
+}
+
+function AssistantTurnHeader({ provider, time }: { provider: Provider; time: string }) {
   return (
-    <DropdownMenu>
-      <Tooltip>
-        <TooltipTrigger render={<DropdownMenuTrigger render={<Button size="sm" aria-label="Chat actions" />} />}>
-          <Settings className="size-4" strokeWidth={1.5} /> Actions <ChevronDown className="size-3.5 opacity-70" />
-        </TooltipTrigger>
-        <TooltipContent>Actions</TooltipContent>
-      </Tooltip>
-      <DropdownMenuContent align="end" className="w-60">
-        {tools.length > 0 && (
-          <>
-            <DropdownMenuGroup>
-              <DropdownMenuLabel>Continue this chat in</DropdownMenuLabel>
-              {tools.map((a) => row(a, a.label.replace(/^Continue in /, "")))}
-            </DropdownMenuGroup>
-            <DropdownMenuSeparator />
-          </>
-        )}
-        <DropdownMenuGroup>
-          <DropdownMenuLabel>Chat</DropdownMenuLabel>
-          <DropdownMenuItem onClick={onRename}>
-            <Pencil className="size-4" strokeWidth={1.5} /> Rename
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={onTogglePin}>
-            {pinned ? <PinOff className="size-4" strokeWidth={1.5} /> : <Pin className="size-4" strokeWidth={1.5} />} {pinned ? "Unpin" : "Pin to top"}
-          </DropdownMenuItem>
-          {onArchive && (
-            <DropdownMenuItem onClick={onArchive}>
-              {chat.userArchived ? <ArchiveRestore className="size-4" strokeWidth={1.5} /> : <Archive className="size-4" strokeWidth={1.5} />} {chat.userArchived ? "Unarchive" : "Archive"}
-            </DropdownMenuItem>
-          )}
-        </DropdownMenuGroup>
-        {open.length > 0 && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuGroup>
-              <DropdownMenuLabel>Open</DropdownMenuLabel>
-              {open.map((a) => row(a))}
-            </DropdownMenuGroup>
-          </>
-        )}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem variant={deleteKind(chat) === "blocked" ? "default" : "destructive"} className={deleteKind(chat) === "blocked" ? "opacity-50" : undefined} onClick={onDelete}>
-          <Trash2 className="size-4" strokeWidth={1.5} /> Delete chat
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <div className="flex items-center gap-3 mb-2.5">
+      <div className="flex size-7 shrink-0 items-center justify-center text-[#f0a83c]">
+        {sourceGlyph(provider, "size-5 text-[#f0a83c]") ?? <ProviderLogo provider={provider} className="size-5 text-[#f0a83c]" />}
+      </div>
+      <span className="font-semibold text-foreground text-[13px]">Assistant</span>
+      <span className="text-[12px] text-muted-foreground">{time}</span>
+    </div>
   );
 }
 
-/** A run of tool steps, collapsed to one line with the shadcn Trace. */
+/** Tool step pill matching Mockup [ ⌄ Inspected OpenCode SQLite schema   ✔ ] */
 const StepsTrace = memo(function StepsTrace({ items, q, rowKey }: { items: { i: number; m: Item }[]; q: string; rowKey: string }) {
   const [open, setOpen] = useStickyOpen(rowKey);
   const hasMatch = !!q && items.some((t) => textHas(t.m.text, q));
   const names = Array.from(new Set(items.map((t) => stepName(t.m))));
+  const summary = names.slice(0, 3).join(", ") || `${items.length} ${items.length === 1 ? "step" : "steps"}`;
+
   return (
-    <Trace className="pl-11">
-      <TraceCollapsible open={open || hasMatch} onOpenChange={setOpen}>
-        <TraceCollapsibleTrigger>
-          <TraceLine>
-            <TraceIcon>
-              <ListTree />
-            </TraceIcon>
-            <TraceTitle>
-              {items.length} {items.length === 1 ? "step" : "steps"}
-            </TraceTitle>
-            <TraceDescription className="max-w-64 truncate">{names.slice(0, 3).join(", ")}</TraceDescription>
-          </TraceLine>
-        </TraceCollapsibleTrigger>
-        <TraceCollapsibleContent>
-          <div className="space-y-1.5">
+    <div className="my-2.5">
+      <div className="rounded-lg border border-border bg-card shadow-xs text-[13px] transition-colors hover:border-border/80 hover:bg-muted/40 dark:border-white/10 dark:bg-[#1a1c1e] dark:hover:border-white/20">
+        <button
+          type="button"
+          onClick={() => setOpen(!open)}
+          className="flex w-full cursor-pointer items-center justify-between px-3.5 py-2.5 text-left font-sans"
+        >
+          <div className="flex items-center gap-2 text-foreground/90">
+            {open ? <ChevronDown className="size-4 text-muted-foreground" /> : <ChevronRight className="size-4 text-muted-foreground" />}
+            <span className="font-medium">{summary}</span>
+          </div>
+          <span className="flex size-5 items-center justify-center rounded-full bg-[#a3e635] text-black">
+            <Check className="size-3" strokeWidth={3} />
+          </span>
+        </button>
+        {(open || hasMatch) && (
+          <div className="border-t border-border bg-muted/40 p-3 space-y-1.5 font-sans dark:border-white/[0.06] dark:bg-[#141618]/60">
             {items.map(({ i, m }) => (
               <StepItem key={i} item={m} q={q} memoKey={`${rowKey}|${m.id ?? m.ts ?? i}`} />
             ))}
           </div>
-        </TraceCollapsibleContent>
-      </TraceCollapsible>
-    </Trace>
+        )}
+      </div>
+    </div>
   );
 });
 
-const MessageRow = memo(function MessageRow({ m, provider, q, isCurrentMatch, toast, rowKey }: { m: Msg; provider: Provider; q: string; isCurrentMatch: boolean; toast: (m: string) => void; rowKey: string }) {
+const UserRow = memo(function UserRow({
+  m,
+  q,
+  isCurrentMatch,
+  rowKey,
+}: {
+  m: Msg;
+  q: string;
+  isCurrentMatch: boolean;
+  rowKey: string;
+}) {
   const [open, setOpen] = useStickyOpen(rowKey);
-  const [copied, setCopied] = useState<string | null>(null);
-  const time = m.ts ? new Date(m.ts).toLocaleTimeString(undefined, { timeStyle: "short" }) : "";
-  const isUser = m.role === "user";
-  const who = isUser ? "You" : PROVIDER_SHORT[provider];
+  const timeFormatted = formatMsgTime(m.ts);
+  const long = m.text.length > 1800;
+  const expanded = open || !!q;
+  const text = long && !expanded ? m.text.slice(0, 1800) + "…" : m.text;
+
+  return (
+    <div className="group/msg flex w-full flex-col border-b border-border/60 pb-6 mb-2 dark:border-white/[0.08]">
+      <div className="flex w-full items-start gap-3.5">
+        <div className="flex size-7 shrink-0 items-center justify-center rounded-full border border-border bg-muted text-muted-foreground dark:border-white/15 dark:bg-white/[0.04]">
+          <User className="size-3.5" strokeWidth={1.75} />
+        </div>
+        <div className="min-w-0 flex-1 space-y-1.5">
+          <div className="flex items-center gap-2 text-[13px]">
+            <span className="font-semibold text-foreground">You</span>
+            <span className="text-[12px] text-muted-foreground">{timeFormatted}</span>
+          </div>
+          <div className="font-sans text-[14px] leading-relaxed text-foreground/90">
+            {m.kind === "image" && typeof m.data === "string" ? (
+              <ChatImage src={m.data} />
+            ) : (
+              <MessageBody text={text} q={q} active={isCurrentMatch} assistant={false} />
+            )}
+            {long && !q && (
+              <button className="mt-1 cursor-pointer font-sans text-xs text-muted-foreground underline" onClick={() => setOpen((o) => !o)}>
+                {open ? "Show less" : "Show all"}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
+
+const AssistantMessage = memo(function AssistantMessage({
+  m,
+  q,
+  isCurrentMatch,
+  rowKey,
+}: {
+  m: Msg;
+  q: string;
+  isCurrentMatch: boolean;
+  rowKey: string;
+}) {
+  const [open, setOpen] = useStickyOpen(rowKey);
+  const long = m.text.length > 1800;
+  const expanded = open || !!q;
+  const text = long && !expanded ? m.text.slice(0, 1800) + "…" : m.text;
 
   if (m.kind === "summary") {
     return (
-      <div className="rounded-lg border border-dashed p-3 text-sm">
-        <button className="flex items-center gap-1.5 text-muted-foreground" onClick={() => setOpen((o) => !o)}>
+      <div className="my-2 rounded-lg border border-dashed border-border p-3 text-sm font-sans dark:border-white/10">
+        <button className="flex cursor-pointer items-center gap-1.5 text-muted-foreground" onClick={() => setOpen((o) => !o)}>
           {open || q ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
           Earlier part was summarized here
         </button>
@@ -896,150 +1053,21 @@ const MessageRow = memo(function MessageRow({ m, provider, q, isCurrentMatch, to
     );
   }
 
-  const long = m.text.length > 1800;
-  const expanded = open || !!q;
-  const text = long && !expanded ? m.text.slice(0, 1800) + "…" : m.text;
-  const copy = async (what: string, value: string) => {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(what);
-      window.setTimeout(() => setCopied(null), 1400);
-    } catch {
-      toast("Could not copy");
-    }
-  };
-
   return (
-    <Message align={isUser ? "end" : "start"}>
-      <MessageAvatar className="self-start bg-transparent">
-        <Avatar>
-          <AvatarFallback className={cn("overflow-hidden", isUser ? "bg-secondary text-secondary-foreground" : provider === "codex" ? "bg-transparent" : "bg-muted")}>
-            {isUser ? <User className="size-4" /> : <ProviderLogo provider={provider} className={provider === "codex" ? "size-full" : "size-5"} />}
-          </AvatarFallback>
-        </Avatar>
-      </MessageAvatar>
-      <MessageContent>
-        <MessageHeader className={cn("gap-2", isUser && "flex-row-reverse")}>
-          <span className="text-foreground">{who}</span>
-          <span className="font-normal">{time}</span>
-          <div className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover/message:opacity-100 focus-within:opacity-100">
-            <MiniAction label={copied === "text" ? "Copied" : "Copy message"} onClick={() => copy("text", m.text)}>
-              {copied === "text" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-            </MiniAction>
-            <MiniAction label={copied === "md" ? "Copied" : "Copy as Markdown"} onClick={() => copy("md", `**${who}** · ${time}\n\n${m.text}`)}>
-              {copied === "md" ? <Check className="size-3.5" /> : <FileText className="size-3.5" />}
-            </MiniAction>
-            <MiniAction label={copied === "quote" ? "Copied" : "Copy as quote"} onClick={() => copy("quote", m.text.split("\n").map((l) => `> ${l}`).join("\n"))}>
-              {copied === "quote" ? <Check className="size-3.5" /> : <Quote className="size-3.5" />}
-            </MiniAction>
-          </div>
-        </MessageHeader>
+    <div className="space-y-2 py-0.5">
+      <div className="font-sans text-[14px] leading-relaxed text-foreground/90">
         {m.kind === "image" && typeof m.data === "string" ? (
-          <div className={cn("max-w-full", isUser && "flex justify-end")}>
-            <ChatImage src={m.data} />
-          </div>
+          <ChatImage src={m.data} />
         ) : (
-        <Bubble variant={isUser ? "secondary" : "outline"} className="max-w-full">
-          <BubbleContent className="overflow-visible">
-            {m.kind === "image" ? <span className="text-muted-foreground">[Image]</span> : <MessageBody text={text} q={q} active={isCurrentMatch} assistant={!isUser} />}
-            {long && !q && (
-              <button className="mt-1 text-xs text-muted-foreground underline" onClick={() => setOpen((o) => !o)}>
-                {open ? "Show less" : "Show all"}
-              </button>
-            )}
-          </BubbleContent>
-        </Bubble>
+          <MessageBody text={text} q={q} active={isCurrentMatch} assistant={true} />
         )}
-      </MessageContent>
-    </Message>
+        {long && !q && (
+          <button className="mt-1 cursor-pointer font-sans text-xs text-muted-foreground underline" onClick={() => setOpen((o) => !o)}>
+            {open ? "Show less" : "Show all"}
+          </button>
+        )}
+      </div>
+    </div>
   );
-  // The toast callback changes identity on every render; it is deliberately left out so rows are not redrawn while scrolling.
-}, (a, b) => a.m === b.m && a.provider === b.provider && a.q === b.q && a.isCurrentMatch === b.isCurrentMatch && a.rowKey === b.rowKey);
+});
 
-function MiniAction({ label, onClick, children }: { label: string; onClick: () => void; children: ReactNode }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger render={<Button variant="ghost" size="icon" className="size-6" aria-label={label} onClick={onClick} />}>{children}</TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
-    </Tooltip>
-  );
-}
-
-
-type BarTick = { i: number; text: string; ts: string; active: boolean };
-
-const PITCH = 8; // height of one tick row, in px
-const PAD = 12; // top padding of the bar, in px
-
-/**
- * The strip of ticks beside the chat. Ticks swell like a wave around the pointer and the closest one
- * turns dark and previews that question. The pointer position is turned into a tick index with plain
- * arithmetic and animated with transforms, so nothing is measured while you move.
- */
-function ConversationBar({ ticks, onPick, onNear }: { ticks: BarTick[]; onPick: (i: number) => void; onNear?: (i: number) => void }) {
-  const navRef = useRef<HTMLElement | null>(null);
-  const topRef = useRef(0);
-  const frame = useRef(0);
-  // Fractional tick position under the pointer, or null when it is away.
-  const [pos, setPos] = useState<number | null>(null);
-
-  const onMove = (e: React.MouseEvent) => {
-    const y = e.clientY;
-    cancelAnimationFrame(frame.current);
-    frame.current = requestAnimationFrame(() => setPos((y - topRef.current - PAD) / PITCH - 0.5));
-  };
-  const nearest = pos === null ? -1 : Math.min(ticks.length - 1, Math.max(0, Math.round(pos)));
-  const near = ticks[nearest];
-  const head = near?.text.trim().split("\n")[0] ?? "";
-
-  useEffect(() => () => cancelAnimationFrame(frame.current), []);
-  // Hovering a tick lets the chat quietly fetch what that tick needs, so the click lands without any waiting.
-  useEffect(() => {
-    if (nearest < 0 || !onNear) return;
-    const t = window.setTimeout(() => onNear(nearest), 120);
-    return () => window.clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nearest]);
-
-  return (
-    <nav
-      ref={navRef}
-      aria-label="Conversation"
-      className="absolute left-0 top-1/2 z-10 flex max-h-[80%] -translate-y-1/2 cursor-pointer flex-col pl-3 pr-5"
-      style={{ paddingTop: PAD, paddingBottom: PAD }}
-      onMouseEnter={(e) => {
-        topRef.current = e.currentTarget.getBoundingClientRect().top;
-      }}
-      onMouseMove={onMove}
-      onMouseLeave={() => {
-        cancelAnimationFrame(frame.current);
-        setPos(null);
-      }}
-      onClick={() => near && onPick(near.i)}
-    >
-      {ticks.map((t, idx) => {
-        // A smooth bump centred on the pointer, about two ticks wide.
-        const f = pos === null ? 0 : Math.exp(-Math.pow(idx - pos, 2) / 5);
-        const hot = pos !== null ? idx === nearest : t.active;
-        const scale = ((hot ? 22 : 10) + 22 * f) / 44;
-        return (
-          <div key={t.i} className="flex items-center" style={{ height: PITCH }}>
-            <div
-              className={cn("w-11 origin-left rounded-full transition-[transform,opacity,background-color] duration-100 ease-out will-change-transform", hot ? "bg-foreground" : "bg-muted-foreground")}
-              style={{ height: hot ? 2.5 : f > 0.5 ? 2 : 1.5, transform: `scaleX(${scale})`, opacity: hot ? 1 : 0.5 + 0.35 * f }}
-            />
-          </div>
-        );
-      })}
-      {near && pos !== null && (
-        <div
-          className="pointer-events-none absolute left-full z-20 ml-1 w-72 rounded-xl border bg-popover p-3 text-popover-foreground shadow-md"
-          style={{ top: PAD + nearest * PITCH + PITCH / 2, transform: "translateY(-50%)" }}
-        >
-          <p className="line-clamp-2 text-xs font-medium">{head}</p>
-          <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">{near.text.trim().slice(head.length).trim() || (near.ts ? fmtDate(Date.parse(near.ts)) : "")}</p>
-        </div>
-      )}
-    </nav>
-  );
-}

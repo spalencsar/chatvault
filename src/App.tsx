@@ -16,7 +16,6 @@ import {
   Settings as SettingsIcon,
   Trash2,
   ArrowUpDown,
-  ChevronsDownUp,
   ChevronsUpDown,
   ListFilter,
   PanelLeft,
@@ -31,8 +30,8 @@ import {
   RefreshCw,
   Save,
   Search,
+  Star,
   Sun,
-  Users,
 } from "lucide-react";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
@@ -40,7 +39,6 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { AppToaster, notify, notifyError, runAction } from "@/toast";
 import { initBulkExport } from "@/bulk-export";
@@ -49,11 +47,13 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { cn } from "@/lib/utils";
 import type { LucideIcon } from "lucide-react";
 import { ContextArea, type Entry } from "@/context-area";
-import { AppLogo, ProviderLogo, ProviderStack, visualProvider } from "@/claude-logo";
+import { NavSidebar, type SourceRow, type SourceSubItem, type WorkspaceRow } from "@/nav-sidebar";
+import { ProviderLogo, VaultLogo } from "@/claude-logo";
+import { sourceGlyph } from "@/source-icons";
 import { Badge } from "@/components/ui/badge";
 import { ActionIcon } from "@/action-icon";
 import { ChatCard } from "@/chat-card";
-import { CORE_PROVIDERS, PROVIDERS, setOffTools, setCustomAccountNames, originalAccountLabel, type Tool, PROVIDER_NAME, isHandoffOnly, deleteKind, deleteBlockedMessage, accountLabel, chatActions, continueTargets, COPY_CONTENT_IDS, prettyProject, setAccountNames, type AccountInfo, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
+import { CORE_PROVIDERS, PROVIDERS, setOffTools, setCustomAccountNames, originalAccountLabel, type Tool, PROVIDER_NAME, isHandoffOnly, deleteKind, deleteBlockedMessage, accountLabel, chatActions, continueTargets, COPY_CONTENT_IDS, setAccountNames, type AccountInfo, type Chat, type ChatAction, type Msg, type MsgPage, type Provider } from "@/chat-actions";
 import { FadedScroll } from "@/faded-scroll";
 import {
   DropdownMenu,
@@ -70,12 +70,10 @@ import {
 import { SidebarSkeleton, MessagesSkeleton } from "@/skeletons";
 import { Splash } from "@/splash";
 import { TitleBar } from "@/titlebar";
-import { AUTO_SYNC_KEY } from "@/store";
+import { AUTO_SYNC_KEY, AUTO_SYNC_INTERVAL_KEY } from "@/store";
 import { chatKey, useAccountNames, useChatMeta, usePersisted } from "@/store";
 import { RenameAccountDialog } from "@/rename-account-dialog";
 import { startAutoUpdate } from "@/updater";
-import { groupChatsByDay } from "@/chat-groups";
-
 // Keep the shell independent of chat rendering, charts and closed dialogs.
 const ChatView = lazy(() => import("@/chat-view").then((m) => ({ default: m.ChatView })));
 const OverviewPage = lazy(() => import("@/overview").then((m) => ({ default: m.OverviewPage })));
@@ -95,6 +93,29 @@ type IndexProg = { phase: string; done: number; total: number };
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+/**
+ * A workspace as a title: "chat-vault" becomes "ChatVault" — the separator disappears and every part starts
+ * with a capital, so a folder name reads as one name instead of "Chat Vault".
+ */
+function workspaceTitle(name: string) {
+  return name
+    .split(/[-_.]+/)
+    .filter(Boolean)
+    .map((w) => w[0].toUpperCase() + w.slice(1))
+    .join("");
+}
+
+function groupByPlatform(list: Chat[]): [string, Chat[]][] {
+  const map = new Map<string, Chat[]>();
+  for (const c of list) {
+    const key = c.account || "Other";
+    const group = map.get(key) ?? [];
+    group.push(c);
+    map.set(key, group);
+  }
+  return [...map.entries()];
+}
+
 export default function App() {
   const [provider, setProvider] = usePersisted<Tool>("chatvault.provider", "claude");
   const [accounts, setAccounts] = usePersisted<Record<string, string>>("chatvault.accounts", {});
@@ -102,23 +123,24 @@ export default function App() {
   const [sort, setSort] = usePersisted("chatvault.sort", "recent");
   const [scope, setScope] = usePersisted("chatvault.scope", "all");
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [view, setView] = useState<"dashboard" | "chats">("dashboard");
   const [sidebarOpen, setSidebarOpen] = usePersisted("chatvault.sidebar", true);
+  // The selected workspace filters the list to one project folder (name + folder, because names repeat).
+  const [project, setProject] = usePersisted<string | null>("chatvault.nav.activeProject", null);
+  const [projectCwd, setProjectCwd] = usePersisted<string | null>("chatvault.nav.activeCwd", null);
+  const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([]);
+  const [loadingWorkspaces, setLoadingWorkspaces] = useState(true);
+  // The browser's Starred pill shows only the chats the user pinned.
+  const [starredOnly, setStarredOnly] = useState(false);
   const [headerOpen, setHeaderOpen] = usePersisted("chatvault.headerOpen", true);
-  const [pinnedOpen, setPinnedOpen] = usePersisted("chatvault.sec.pinned", true);
-  const [todayOpen, setTodayOpen] = usePersisted("chatvault.sec.today", true);
-  const [yesterdayOpen, setYesterdayOpen] = usePersisted("chatvault.sec.yesterday", true);
-  const [calendarDay, setCalendarDay] = useState(() => new Date().toDateString());
-  useEffect(() => {
-    const timer = window.setInterval(() => setCalendarDay(new Date().toDateString()), 60_000);
-    return () => window.clearInterval(timer);
-  }, []);
-  const [recentOpen, setRecentOpen] = usePersisted("chatvault.sec.recent", true);
+  const [todayOpen] = usePersisted("chatvault.sec.today", true);
+  const [yesterdayOpen] = usePersisted("chatvault.sec.yesterday", true);
+  const [recentOpen] = usePersisted("chatvault.sec.recent", true);
   const [dark, setDark] = useState(() => localStorage.getItem("theme") !== "light");
   const { pins, names, togglePin, rename } = useChatMeta();
   const { accountNames, renameAccount } = useAccountNames();
   setCustomAccountNames(accountNames);
   const [renamingAccount, setRenamingAccount] = useState<string | null>(null);
-  const [accountOpen, setAccountOpen] = useState(false);
 
   const [overview, setOverview] = useState<Record<Provider, Overview | null>>({ claude: null, codex: null, cursor: null, gemini: null, opencode: null, cline: null, grok: null, hermes: null, antigravity: null, imported: null });
   const [accountInfo, setAccountInfo] = useState<AccountInfo[]>([]);
@@ -254,9 +276,11 @@ export default function App() {
         if (!cancelled && result && result.copied > 0) await rescan();
       })();
     }, 750);
+    const intervalMin = parseInt(localStorage.getItem(AUTO_SYNC_INTERVAL_KEY) || "10", 10);
+    const intervalMs = (isNaN(intervalMin) || intervalMin < 1 ? 10 : intervalMin) * 60 * 1000;
     const every = window.setInterval(() => {
       if (localStorage.getItem(AUTO_SYNC_KEY) !== "0") void invoke("sync_chats").then(() => rescan()).catch(() => {});
-    }, 10 * 60 * 1000);
+    }, intervalMs);
     const stopUpdates = startAutoUpdate();
     const offSync = listen("tray-sync", () => setSyncOpen(true));
     const offScan = listen("tray-rescan", () => void rescan());
@@ -284,6 +308,25 @@ export default function App() {
     );
   }, [reloadKey]);
 
+  // The nav column: one row per project folder, counts for the current source and scope.
+  useEffect(() => {
+    if (!isTauri) return;
+    let stale = false;
+    setLoadingWorkspaces(true);
+    invoke<WorkspaceRow[]>("workspaces", { provider, scope })
+      .then((w) => {
+        if (stale) return;
+        setWorkspaces(w);
+        setProject((current) => current ?? (w[0]?.project ?? null));
+        setProjectCwd((current) => current ?? (w[0]?.cwd ?? null));
+      })
+      .catch(() => {})
+      .finally(() => !stale && setLoadingWorkspaces(false));
+    return () => {
+      stale = true;
+    };
+  }, [provider, scope, reloadKey]);
+
   // Pinned chats of the current tool.
   useEffect(() => {
     if (!isTauri) return;
@@ -309,7 +352,7 @@ export default function App() {
     let stale = false;
     setLoadingList(true);
     setHits(null);
-    invoke<{ items: Chat[]; total: number }>("query_chats", { provider, account, q, offset: 0, limit: PAGE_SIZE, sort, scope })
+    invoke<{ items: Chat[]; total: number }>("query_chats", { provider, account, q, offset: 0, limit: PAGE_SIZE, sort, scope, project, cwd: projectCwd })
       .then((r) => {
         if (stale) return;
         setItems(r.items);
@@ -321,7 +364,7 @@ export default function App() {
     return () => {
       stale = true;
     };
-  }, [provider, account, q, sort, scope, reloadKey, searchingAll]);
+  }, [provider, account, q, sort, scope, project, projectCwd, reloadKey, searchingAll]);
 
   // Searching looks in every tool at once: matching titles and projects, plus the words inside the chats (instant, from the search index).
   useEffect(() => {
@@ -354,9 +397,11 @@ export default function App() {
             }
           });
         });
-        list.sort((x, y) => y.lastMs - x.lastMs);
-        setItems(list);
-        setTotal(list.length);
+        // The workspace keeps ruling: a search narrows inside it instead of overruling it.
+        const scoped = list.filter((c) => (!project || c.project === project) && (!projectCwd || c.cwd === projectCwd));
+        scoped.sort((x, y) => y.lastMs - x.lastMs);
+        setItems(scoped);
+        setTotal(scoped.length);
         setHits(snippets);
         setError(null);
         setLoadingList(false);
@@ -367,7 +412,7 @@ export default function App() {
     return () => {
       stale = true;
     };
-  }, [q, searchingAll, reloadKey]);
+  }, [q, searchingAll, reloadKey, project, projectCwd]);
 
   useEffect(() => {
     let timer: number | undefined;
@@ -417,11 +462,13 @@ export default function App() {
 
   const openId = useRef(0);
   const [outline, setOutline] = useState<{ ts: string; text: string }[] | null>(null);
+  const [searchTarget, setSearchTarget] = useState<string>("");
   const open = useCallback(
-    (chat: Chat) => {
+    (chat: Chat, searchWord?: string) => {
       const id = ++openId.current;
       setSearchAll(false);
       setSelected(chat);
+      setSearchTarget(searchWord ?? "");
       setPage(null);
       setOutline(null);
       // A light outline of the whole chat for the timeline, built in the background; only a few short lines come back.
@@ -703,37 +750,24 @@ export default function App() {
   };
 
   const switchProvider = (p: Tool) => {
-    if (p === provider) return;
     setProvider(p);
+    setProject(null);
+    setProjectCwd(null);
+    setAccounts((a) => ({ ...a, [p]: "all" }));
     setQuery("");
     setSelected(null);
   };
 
-  const tag = (id: string) => {
-    const a = accountInfo.find((x) => x.id === id);
-    const parts = [a?.desktopCurrent && "Desktop", a?.cliCurrent && "CLI"].filter(Boolean);
-    return parts.length ? ` · ${parts.join(" + ")}` : "";
-  };
-  // Every tool with chats, plus the three main ones. The picker grows with the tools ChatVault supports.
+  // Every tool with chats, plus the three main ones. The source list grows with the tools ChatVault supports.
   const toolList: Tool[] = ["all", ...PROVIDERS.filter((p) => CORE_PROVIDERS.includes(p) || (overview[p]?.total ?? 0) > 0 || p === provider)];
-  const stackTools = toolList.filter((x): x is Provider => x !== "all");
-  const toolName = (p: Tool) => (p === "all" ? "All chats" : PROVIDER_NAME[p]);
+  // The navigation uses the short names of the reference mockup: "Hermes", not the full "Hermes Agent".
+  const toolName = (p: Tool) => (p === "all" ? "All chats" : p === "hermes" ? "Hermes" : PROVIDER_NAME[p]);
   const toolTotal = (p: Tool) => (p === "all" ? PROVIDERS.reduce((n, x) => n + (overview[x]?.total ?? 0), 0) : overview[p]?.total ?? 0);
-  const toolItems = Object.fromEntries(toolList.map((p) => [p, toolName(p)]));
   const accountList = provider === "all" ? [] : overview[provider]?.accounts ?? [];
-  const accountItems = useMemo(
-    () => ({
-      all: `${provider === "imported" ? "All platforms" : "All accounts"} · ${toolTotal(provider).toLocaleString()}`,
-      ...Object.fromEntries(accountList.map((a) => [a.id, `${accountLabel(a.id)} · ${a.count.toLocaleString()}${provider === "claude" ? tag(a.id) : ""}`])),
-    }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [accountList, overview, provider, accountInfo, accountNames],
-  );
 
   const lq = q.toLowerCase();
   const pinnedShown = pinned.filter((c) => !lq || named(c).title.toLowerCase().includes(lq) || c.project.toLowerCase().includes(lq));
   const recent = useMemo(() => items.filter((c) => !pinSet.has(chatKey(c))), [items, pinSet]);
-  const dayGroups = useMemo(() => groupChatsByDay(recent), [recent, calendarDay]);
   const projectGroups = useMemo(() => groupByProject(recent), [recent]);
   const projectNames = useMemo(() => projectGroups.map(([name]) => name), [projectGroups]);
   const allProjectsClosed = projectNames.length > 0 && projectNames.every((n) => !projectOpen(n));
@@ -832,10 +866,10 @@ export default function App() {
   ];
 
   // Stable wrappers around the latest closures, so a card only re-renders when its own data changes.
-  const latest = useRef({ extras, open });
-  latest.current = { extras, open };
+  const latest = useRef({ extras, open, q });
+  latest.current = { extras, open, q };
   const getExtras = useCallback((c: Chat) => latest.current.extras(c), []);
-  const openChat = useCallback((c: Chat) => latest.current.open(c), []);
+  const openChat = useCallback((c: Chat) => latest.current.open(c, latest.current.q.trim()), []);
 
   const row = (c: Chat, inProject = false) => (
     <ChatRow
@@ -879,205 +913,259 @@ export default function App() {
     </>
   );
 
-  const listOrganize = provider === "imported" ? "project" : organize;
-  const renderChatList = (list: Chat[]) => (
-    listOrganize === "project"
-                  ? groupByProject(list).map(([project, list]) => {
-                      const isOpen = projectOpen(project);
-                      return (
-                        <Collapsible
-                          key={project}
-                          open={isOpen}
-                          onOpenChange={(o) => setProjectExceptions((c) => (o === (projectsMode === "open") ? c.filter((x) => x !== project) : c.includes(project) ? c : [...c, project]))}
-                          className="pt-1"
-                          onPointerEnter={() => setWarmProjects((w) => (w.has(project) ? w : new Set(w).add(project)))}
-                        >
-                          <CollapsibleTrigger className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground">
-                            <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", isOpen && "rotate-90")} />
-                            <FolderOpen className="size-3.5 shrink-0" strokeWidth={1.5} />
-                            <span className="min-w-0 flex-1 truncate text-left">{prettyProject(project)}</span>
-                            <Badge variant="secondary" className="h-4 px-1.5 text-[11px] tabular-nums text-muted-foreground">{list.length}</Badge>
-                          </CollapsibleTrigger>
-                          <CollapsibleContent className="space-y-0.5" keepMounted={warmProjects.has(project)}>
-                            {(isOpen || warmProjects.has(project)) && list.map((c) => row(c, true))}
-                          </CollapsibleContent>
-                        </Collapsible>
-                      );
-                    })
-                  : list.map((c) => row(c))
+  const listOrganize = project ? "list" : organize;
+  const renderChatList = (list: Chat[]) => {
+    if (provider === "imported" && account === "all") {
+      return groupByPlatform(list).map(([plat, groupChats]) => (
+        <div key={plat} className="space-y-2 pt-3 first:pt-0">
+          <div className="flex items-center gap-2 px-1 py-1 text-[12px] font-semibold tracking-wider text-muted-foreground uppercase">
+            <span className="shrink-0">
+              {sourceGlyph(plat, "size-3.5") ?? <ProviderLogo provider={plat as any} className="size-3.5 grayscale" />}
+            </span>
+            <span>{accountLabel(plat)}</span>
+            <span className="text-[11px] font-normal tabular-nums text-muted-foreground/70">({groupChats.length})</span>
+            <div className="h-px flex-1 bg-border/40" />
+          </div>
+          {groupChats.map((c) => row(c))}
+        </div>
+      ));
+    }
+    if (listOrganize === "project") {
+      return groupByProject(list).map(([project, list]) => {
+        const isOpen = projectOpen(project);
+        return (
+          <Collapsible
+            key={project}
+            open={isOpen}
+            onOpenChange={(o) => setProjectExceptions((c) => (o === (projectsMode === "open") ? c.filter((x) => x !== project) : c.includes(project) ? c : [...c, project]))}
+            className="pt-1"
+            onPointerEnter={() => setWarmProjects((w) => (w.has(project) ? w : new Set(w).add(project)))}
+          >
+            <CollapsibleTrigger className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-[13px] text-muted-foreground hover:bg-muted/60 hover:text-foreground">
+              <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", isOpen && "rotate-90")} />
+              <FolderOpen className="size-3.5 shrink-0" strokeWidth={1.5} />
+              <span className="min-w-0 flex-1 truncate text-left">{workspaceTitle(project)}</span>
+              <Badge variant="secondary" className="h-4 px-1.5 text-[12px] tabular-nums text-muted-foreground">{list.length}</Badge>
+            </CollapsibleTrigger>
+            <CollapsibleContent className="space-y-0.5" keepMounted={warmProjects.has(project)}>
+              {(isOpen || warmProjects.has(project)) && list.map((c) => row(c, true))}
+            </CollapsibleContent>
+          </Collapsible>
+        );
+      });
+    }
+    return list.map((c) => row(c));
+  };
+
+
+
+  const importedSubItems: SourceSubItem[] = accountList.map((a) => ({
+    id: a.id,
+    label: accountLabel(a.id),
+    count: a.count,
+    active: provider === "imported" && account === a.id,
+    logo: sourceGlyph(a.id, "size-3.5") ?? <ProviderLogo provider={a.id as any} className="size-3.5 grayscale" />,
+  }));
+
+  const sourceRows: SourceRow[] = [
+    { id: "all", label: "All chats", logo: <Layers className="size-5 text-foreground" strokeWidth={1.5} />, count: toolTotal("all"), active: provider === "all" && project === null },
+    ...toolList
+      .filter((p): p is Provider => p !== "all")
+      .map((p) => ({
+        id: p,
+        label: toolName(p),
+        logo: sourceGlyph(p, "size-5") ?? <ProviderLogo provider={p} className="size-5 grayscale" />,
+        count: toolTotal(p),
+        active: provider === p && project === null,
+        subItems: p === "imported" && accountList.length > 1 ? importedSubItems : undefined,
+        onSelectSubItem:
+          p === "imported"
+            ? (subId: string) => {
+                setView("chats");
+                setProvider("imported");
+                setProject(null);
+                setProjectCwd(null);
+                setAccounts((a) => ({ ...a, imported: subId }));
+                setQuery("");
+                setSelected(null);
+              }
+            : undefined,
+      })),
+  ];
+
+  const activeWorkspace = workspaces.find((w) => w.project === project && w.cwd === projectCwd);
+  // One pill per scope. "All" is the amber one; the other two carry an icon and a hairline ring, like the mockup.
+  const browserPill = (id: "all" | "starred" | "archived", label: string, icon?: ReactNode) => {
+    const active = id === "all" ? !starredOnly && scope !== "archived" : id === "starred" ? starredOnly : !starredOnly && scope === "archived";
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          if (id === "starred") setStarredOnly(true);
+          else {
+            setStarredOnly(false);
+            setScope(id === "archived" ? "archived" : "all");
+          }
+        }}
+        className={cn(
+          "flex h-8 cursor-pointer items-center gap-1.5 rounded-full px-3.5 text-[13px] font-medium transition-colors",
+          active
+            ? "bg-[#f0a83c] text-[#120d04] font-semibold"
+            : "border border-border text-muted-foreground hover:bg-muted hover:text-foreground dark:border-white/[0.12] dark:hover:bg-white/[0.06]",
+        )}
+      >
+        {icon}
+        {label}
+      </button>
+    );
+  };
+
+  // The status line of the mockup: a green dot and the archive state, nothing else.
+  const navStatus = indexing ? (
+    <span className="flex items-center gap-2">
+      <Loader2 className="size-3.5 animate-spin" />
+      <span className="truncate">{indexing.phase} {indexing.done}/{indexing.total}</span>
+    </span>
+  ) : (
+    <span className="flex items-center gap-2">
+      <span className="size-2.5 shrink-0 rounded-full bg-[#22c55e]" />
+      <span>Archive up to date</span>
+    </span>
   );
 
   return (
     <TooltipProvider delay={200}>
-      <div className="flex h-screen overflow-hidden bg-background text-foreground">
+      <div className="flex h-screen flex-col overflow-hidden bg-background text-foreground">
       {splash !== "off" && <Splash leaving={splash === "leaving"} />}
-        {/* Sidebar */}
-        <aside className={cn("flex shrink-0 flex-col overflow-hidden border-r transition-[width] duration-300 ease-in-out", sidebarOpen ? "w-[320px]" : "w-0 border-r-0")}>
-          {sidebarOpen ? (
-            <div data-tauri-drag-region className="flex h-14 shrink-0 items-center gap-1 pl-3 pr-14">
-              <button
-                onClick={() => setSelected(null)}
-                className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 p-1 text-left outline-none"
-              >
-                <AppLogo className="size-7 shrink-0 rounded-lg ring-1 ring-border" />
-                <div className="flex min-w-0 items-center gap-2">
-                  <h1 className="truncate text-base font-medium leading-tight">ChatVault</h1>
-                </div>
-              </button>
-            </div>
-          ) : null}
-          <div className={cn("flex min-h-0 w-[320px] flex-1 flex-col transition-opacity duration-200", sidebarOpen ? "opacity-100" : "pointer-events-none opacity-0")}>
+        <TitleBar
+          sidebarOpen={sidebarOpen}
+          busy={!!indexing}
+          dark={dark}
+          query={query}
+          onQuery={(q) => {
+            setQuery(q);
+            if (q.trim().length > 0) {
+              setProject(null);
+              setProjectCwd(null);
+              setProvider("all");
+              if (view === "dashboard") {
+                setView("chats");
+              }
+            }
+          }}
+          onToggleSidebar={() => setSidebarOpen((o) => !o)}
+          onRefresh={() => void rescan()}
+          onTheme={() => setDark((d) => !d)}
+          onHome={() => {
+            setView("dashboard");
+            setSelected(null);
+            setSearchAll(false);
+            setProject(null);
+            setProjectCwd(null);
+          }}
+          onSearch={(q) => openSearch(q)}
+          onOpenPalette={() => setPaletteOpen(true)}
+          onSettings={() => setSettingsOpen(true)}
+        />
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+        {/* Nav column: workspaces, sources, archive status */}
+        <aside className={cn("flex shrink-0 flex-col overflow-hidden border-r border-border bg-surface-nav transition-[width] duration-300 ease-in-out", sidebarOpen ? "w-[301px]" : "w-0 border-r-0")}>
+          <div className={cn("flex min-h-0 w-[301px] flex-1 flex-col transition-opacity duration-200", sidebarOpen ? "opacity-100" : "pointer-events-none opacity-0")}>
+            <NavSidebar
+              isDashboard={view === "dashboard"}
+              onSelectDashboard={() => {
+                setView("dashboard");
+                setSelected(null);
+                setProject(null);
+                setProjectCwd(null);
+              }}
+              workspaces={workspaces}
+              loadingWorkspaces={loadingWorkspaces}
+              activeProject={project}
+              activeCwd={projectCwd}
+              onSelectProject={(w) => {
+                setView("chats");
+                setProject(w?.project ?? null);
+                setProjectCwd(w?.cwd ?? null);
+                if (w) setProvider("all");
+              }}
+              sources={sourceRows}
+              onSelectSource={(id) => {
+                setView("chats");
+                switchProvider(id as Tool);
+              }}
+              status={navStatus}
+            />
+          </div>
+        </aside>
 
-          <div className="space-y-2 px-3 pb-3">
-            <div className="relative">
-              <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
-              <Input
-                className="h-9 pl-8"
-                placeholder="Search chats"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
+        {/* Conversation browser */}
+        {view === "chats" && (
+        <section className="flex w-[390px] shrink-0 flex-col overflow-hidden border-r border-border bg-surface-browser">
+          <div className="shrink-0 px-4 pb-3 pt-3.5">
+            <div className="flex items-center gap-2.5">
+              <FolderOpen className="size-[22px] shrink-0 text-[#f0a83c]" strokeWidth={1.75} />
+              <h2 className="min-w-0 flex-1 truncate font-sans text-[20px] font-semibold leading-tight text-foreground" title={project ?? undefined}>
+                {project ? workspaceTitle(project) : (provider === "all" ? "All conversations" : PROVIDER_NAME[provider])}
+              </h2>
+              <FiltersMenu
+                sort={sort}
+                scope={scope}
+                tags={tagList}
+                onSort={setSort}
+                onScope={setScope}
+                onReset={() => {
+                  setSort("recent");
+                  setScope("all");
+                }}
               />
-              {searching && <Loader2 className="absolute right-2.5 top-2.5 size-4 animate-spin text-muted-foreground" />}
             </div>
-            <div className={cn("grid gap-2", provider === "all" ? "grid-cols-1" : "grid-cols-2")}>
-              <Select value={provider} onValueChange={(v) => v && switchProvider(v as Tool)} items={toolItems}>
-                <SelectTrigger className="h-9 w-full min-w-0">
-                  {provider === "all" ? <Layers className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} /> : <ProviderLogo provider={provider} className="size-4 shrink-0" />}
-                  <SelectValue />
-                  {provider === "all" && <ProviderStack providers={stackTools} className="ml-auto mr-1" />}
-                </SelectTrigger>
-                <SelectContent alignItemWithTrigger={false} align="start" sideOffset={6} className={cn("max-w-none", provider === "all" ? "w-(--anchor-width)" : "w-[calc(var(--anchor-width)*2+0.5rem)]")}>
-                  {toolList.map((p) => (
-                    <SelectItem key={p} value={p} className="pr-1" trailing={<span className="min-w-7 text-right text-xs tabular-nums text-muted-foreground">{toolTotal(p).toLocaleString()}</span>}>
-                      {p === "all" ? <Layers className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} /> : <ProviderLogo provider={p} className="size-4 shrink-0" />}
-                      <span className="flex-1">{toolName(p)}</span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {provider !== "all" && (
-              <Select open={accountOpen} onOpenChange={setAccountOpen} value={account} onValueChange={(v) => v && setAccounts((a) => ({ ...a, [provider]: v }))} items={accountItems}>
-                <SelectTrigger className="h-9 w-full">
-                  {provider === "imported" && account !== "all" ? (
-                    <ProviderLogo provider={visualProvider("imported", account)} className="size-4 shrink-0" />
-                  ) : (
-                    <Users className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} />
-                  )}
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent alignItemWithTrigger={false} align="end" sideOffset={6} className="w-72">
-                  {Object.entries(accountItems).map(([id, label]) => (
-                    <SelectItem
-                      key={id}
-                      value={id}
-                      trailing={
-                        id !== "all" && id !== "unknown" ? (
-                          <button
-                            type="button"
-                            aria-label={`Rename ${accountLabel(id)}`}
-                            title="Rename account"
-                            className="ml-1 flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                            onPointerDown={(e) => e.stopPropagation()}
-                            onPointerUp={(e) => e.stopPropagation()}
-                            onMouseDown={(e) => e.stopPropagation()}
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              setAccountOpen(false);
-                              setRenamingAccount(id);
-                            }}
-                          >
-                            <Pencil className="size-3.5" strokeWidth={1.5} />
-                          </button>
-                        ) : undefined
-                      }
-                    >
-                      {provider === "imported" && id !== "all" && (
-                        <ProviderLogo provider={visualProvider("imported", id)} className="size-4 shrink-0" />
-                      )}
-                      {/* A long name is cut with "…" and shown in full on hover, so the tick and the pencil always stay in view. */}
-                      <span className="block max-w-[13.5rem] truncate" title={label}>
-                        {label}
-                      </span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              )}
+            <p className="mt-1 truncate text-[13px] text-muted-foreground" title={activeWorkspace?.cwd}>
+              {activeWorkspace?.cwd ?? (provider === "imported" ? "~/Documents/ChatVault Import" : provider === "all" ? "Every source" : PROVIDER_NAME[provider])}
+            </p>
+            <div className="mt-3 flex items-center gap-2">
+              {browserPill("all", "All")}
+              {browserPill("starred", "Starred", <Star className="size-3.5 shrink-0" strokeWidth={1.75} />)}
+              {browserPill("archived", "Archived", <Archive className="size-3.5 shrink-0" strokeWidth={1.75} />)}
             </div>
           </div>
-          <Separator className="mx-3 w-auto opacity-70" />
 
           <ContextArea className="flex min-h-0 flex-1 flex-col" entries={() => listEntries()} onError={(e) => say(String(e))}>
           <FadedScroll className="flex-1" fadeTop={false}>
-            <div className="p-1.5 pr-3.5">
-              {pinnedShown.length > 0 && (
-                <Section title="Pinned" count={pinnedShown.length} open={pinnedOpen} onOpenChange={setPinnedOpen}>
-                  {pinnedShown.map((c) => row(c))}
-                </Section>
-              )}
-              {/* A day with no chats is left out, so the list never shows an empty heading. */}
-              {dayGroups.today.length > 0 && (
-                <Section title="Today" count={dayGroups.today.length} open={todayOpen} onOpenChange={setTodayOpen}>
-                  {renderChatList(dayGroups.today)}
-                </Section>
-              )}
-              {dayGroups.yesterday.length > 0 && (
-                <Section title="Yesterday" count={dayGroups.yesterday.length} open={yesterdayOpen} onOpenChange={setYesterdayOpen}>
-                  {renderChatList(dayGroups.yesterday)}
-                </Section>
-              )}
-              <Section
-                title="Recent"
-                count={dayGroups.recent.length}
-                open={recentOpen}
-                onOpenChange={setRecentOpen}
-                action={
-                  <div className="flex items-center">
-                    {organize === "project" && (
-                      <Tip label={allProjectsClosed ? "Expand all projects" : "Collapse all projects"}>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          aria-label={allProjectsClosed ? "Expand all projects" : "Collapse all projects"}
-                          className="size-7 shrink-0 text-muted-foreground"
-                          onClick={() => {
-                            setProjectsMode(allProjectsClosed ? "open" : "closed");
-                            setProjectExceptions([]);
-                          }}
-                        >
-                          {allProjectsClosed ? <ChevronsUpDown className="size-4" /> : <ChevronsDownUp className="size-4" />}
-                        </Button>
-                      </Tip>
-                    )}
-                  <FiltersMenu
-                    sort={sort}
-                    scope={scope}
-                    tags={tagList}
-                    organize={organize}
-                    onSort={setSort}
-                    onScope={setScope}
-                    onOrganize={setOrganize}
-                    onReset={() => {
-                      setSort("recent");
-                      setScope("all");
-                      setOrganize("list");
-                    }}
-                  />
-                  </div>
-                }
-              >
-                {(loadingList || !!indexing || (searching && items.length === 0)) && items.length === 0 && <SidebarSkeleton rows={searching ? 5 : 8} />}
-                {!loadingList && !indexing && !searching && !error && recent.length === 0 && (
+            <div className="space-y-2 p-2">
+              {starredOnly ? (
+                pinnedShown.length === 0 ? (
                   <div className="flex flex-col items-center gap-2 p-8 text-center">
-                    <Search className="size-8 text-muted-foreground" strokeWidth={1.25} />
-                    <p className="text-sm font-medium">No Chats Found</p>
-                    <p className="text-xs text-muted-foreground">Try a different word or account.</p>
+                    <Star className="size-8 text-muted-foreground" strokeWidth={1.25} />
+                    <p className="text-sm font-medium">No Starred Chats</p>
+                    <p className="text-xs text-muted-foreground">Star a chat to find it here.</p>
                   </div>
-                )}
-                {renderChatList(dayGroups.recent)}
-              </Section>
-              {hasMore && (todayOpen || yesterdayOpen || recentOpen) && (
+                ) : (
+                  pinnedShown.map((c) => row(c))
+                )
+              ) : (
+                <>
+                  {indexing && items.length === 0 ? (
+                    <div className="flex flex-col items-center gap-3 p-8 text-center text-muted-foreground">
+                      <Loader2 className="size-6 animate-spin text-[#f0a83c]" />
+                      <p className="text-sm font-medium text-foreground">Reading conversations…</p>
+                      <p className="text-xs text-muted-foreground">
+                        {indexing.phase} ({indexing.done}/{indexing.total})
+                      </p>
+                    </div>
+                  ) : (loadingList || (searching && items.length === 0)) && items.length === 0 ? (
+                    <SidebarSkeleton rows={searching ? 5 : 8} />
+                  ) : !loadingList && !indexing && !searching && !error && recent.length === 0 ? (
+                    <div className="flex flex-col items-center gap-2 p-8 text-center">
+                      <Search className="size-8 text-muted-foreground" strokeWidth={1.25} />
+                      <p className="text-sm font-medium">No Chats Found</p>
+                      <p className="text-xs text-muted-foreground">Try a different word or account.</p>
+                    </div>
+                  ) : null}
+                  {renderChatList(recent)}
+                </>
+              )}
+              {hasMore && !starredOnly && (
                 <div ref={sentinelRef}>
                   <SidebarSkeleton rows={3} />
                 </div>
@@ -1085,12 +1173,15 @@ export default function App() {
             </div>
           </FadedScroll>
           </ContextArea>
+
+          <div className="flex h-12 shrink-0 items-center border-t border-border px-4 text-[13px] tabular-nums text-muted-foreground">
+            {(starredOnly ? pinnedShown.length : total).toLocaleString()} conversations
           </div>
-        </aside>
+        </section>
+        )}
 
         {/* Content */}
         <div className="flex min-w-0 flex-1 flex-col">
-        <TitleBar title={selected ? `${PROVIDER_NAME[selected.provider]} / ${prettyProject(selected.project)}` : undefined} actions={selected ? searchButton : undefined} sidebarOpen={sidebarOpen} busy={!!indexing} dark={dark} onRefresh={rescan} onTheme={() => setDark((d) => !d)} />
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
           <Suspense fallback={<MessagesSkeleton />}>
           {searchAll ? (
@@ -1099,13 +1190,15 @@ export default function App() {
               initial={searchSeed}
               titleOf={(c) => named(c).title}
               onClose={() => setSearchAll(false)}
-              onOpenChat={(c) => {
+              onOpenChat={(c, term) => {
                 setSearchAll(false);
+                setQuery("");
+                setView("chats");
                 if (c.provider !== provider) setProvider(c.provider);
-                open(c);
+                open(c, term);
               }}
             />
-          ) : !selected ? (
+          ) : view === "dashboard" ? (
             <OverviewPage
               actions={controls}
               indexing={indexing}
@@ -1115,6 +1208,8 @@ export default function App() {
               reloadKey={reloadKey}
               titleOf={(c) => named(c).title}
               onOpenChat={(c) => {
+                setQuery("");
+                setView("chats");
                 if (c.provider !== provider) setProvider(c.provider);
                 open(c);
               }}
@@ -1123,14 +1218,26 @@ export default function App() {
               dark={dark}
               onTheme={() => setDark((d) => !d)}
               onRefresh={() => void rescan()}
-              onShowTool={(p) => switchProvider(p)}
+              onShowTool={(p) => {
+                setView("chats");
+                switchProvider(p);
+              }}
               onOpenBackup={() => void invoke("open_backup_folder").catch((e) => say(String(e)))}
               rowEntries={(c) => chatEntries(named(c), say, null, extras(c))}
+              workspaces={workspaces}
+              onSelectProject={(w) => {
+                setView("chats");
+                setProject(w?.project ?? null);
+                setProjectCwd(w?.cwd ?? null);
+                if (w) setProvider("all");
+              }}
+              pinned={pinned}
             />
-          ) : (
+          ) : selected ? (
             <ChatView
               key={chatKey(selected)}
               chat={named(selected)}
+              initialQuery={searchTarget}
               page={page}
               loadingEarlier={loadingEarlier}
               live={live}
@@ -1149,12 +1256,22 @@ export default function App() {
               onDelete={() => requestDelete(selected)}
               onSearchAll={(q) => openSearch(q)}
               onRefresh={() => { void rescan(); open(selected); }}
-              onOverview={() => setSelected(null)}
+              onOverview={() => {
+                setView("dashboard");
+                setSelected(null);
+              }}
               toast={say}
             />
+          ) : (
+            <div className="flex flex-1 flex-col items-center justify-center text-center p-8 text-muted-foreground select-none">
+              <VaultLogo className="size-16 mb-4 opacity-25" />
+              <p className="text-lg font-medium text-foreground/80">No conversation selected</p>
+              <p className="text-sm mt-1 max-w-sm text-muted-foreground">Select a conversation from the list to view its messages, export it, or continue the thread.</p>
+            </div>
           )}
           </Suspense>
         </main>
+        </div>
         </div>
 
         <Suspense fallback={null}>
@@ -1164,15 +1281,18 @@ export default function App() {
           provider={provider === "all" ? "claude" : provider}
           pinned={pinned}
           titleOf={(c) => named(c).title}
-          onOpenChat={(c) => {
+          onOpenChat={(c, term) => {
+            setPaletteOpen(false);
+            setQuery("");
+            setView("chats");
             if (c.provider !== provider) setProvider(c.provider);
-            open(c);
+            open(c, term);
           }}
           actions={[
-            { id: "overview", label: "Back to Home", icon: <LayoutDashboard className="size-4" />, run: () => setSelected(null) },
-            { id: "claude", label: "Show Claude chats", icon: <ProviderLogo provider="claude" className="size-4" />, run: () => switchProvider("claude") },
-            { id: "codex", label: "Show Codex chats", icon: <ProviderLogo provider="codex" className="size-4" />, run: () => switchProvider("codex") },
-            { id: "grok", label: "Show Grok chats", icon: <ProviderLogo provider="grok" className="size-4" />, run: () => switchProvider("grok") },
+            { id: "overview", label: "Back to Home", icon: <LayoutDashboard className="size-4" />, run: () => { setView("dashboard"); setSelected(null); } },
+            { id: "claude", label: "Show Claude chats", icon: <ProviderLogo provider="claude" className="size-4" />, run: () => { setView("chats"); switchProvider("claude"); } },
+            { id: "codex", label: "Show Codex chats", icon: <ProviderLogo provider="codex" className="size-4" />, run: () => { setView("chats"); switchProvider("codex"); } },
+            { id: "grok", label: "Show Grok chats", icon: <ProviderLogo provider="grok" className="size-4" />, run: () => { setView("chats"); switchProvider("grok"); } },
             { id: "sync", label: "Sync & backup", icon: <DatabaseBackup className="size-4" />, run: () => setSyncOpen(true) },
             { id: "settings", label: "Settings", icon: <SettingsIcon className="size-4" />, run: () => setSettingsOpen(true) },
             { id: "import", label: "Import NousSave chats", icon: <FilePlus2 className="size-4" />, run: () => {
@@ -1196,13 +1316,6 @@ export default function App() {
           ]}
         />}
         </Suspense>
-        <div className={cn("fixed top-3 z-30 transition-[left] duration-300 ease-in-out", sidebarOpen ? "left-[272px]" : "left-3", splash !== "off" && "hidden")}>
-          <Tip label={sidebarOpen ? "Hide the sidebar" : "Show the sidebar"}>
-            <Button variant="ghost" size="icon" className="text-muted-foreground" aria-label={sidebarOpen ? "Hide the sidebar" : "Show the sidebar"} onClick={() => setSidebarOpen((o) => !o)}>
-              <PanelLeft className="size-4" />
-            </Button>
-          </Tip>
-        </div>
         <Suspense fallback={null}>
           {syncOpen && <SyncDialog open={syncOpen} onOpenChange={setSyncOpen} onChanged={rescan} onMove={setMovePending} toast={say} />}
           {movePending && (
@@ -1229,7 +1342,8 @@ export default function App() {
             <SettingsDialog
               open={settingsOpen}
               onOpenChange={setSettingsOpen}
-              onOpenBackup={() => setSyncOpen(true)}
+              dark={dark}
+              onSetDark={setDark}
               onToolsChanged={async () => {
                 const off = await applyOff();
                 if (provider !== "all" && off.includes(provider)) setProvider("all");
@@ -1292,63 +1406,36 @@ const groupByProject = (list: Chat[]) => {
 
 const orderChat = (list: ChatAction[]) => [...list.filter((a) => !a.danger), ...list.filter((a) => a.danger)];
 
-function Section({ title, count, open, onOpenChange, action, children }: { title: string; count: number; open: boolean; onOpenChange: (o: boolean) => void; action?: ReactNode; children: ReactNode }) {
-  return (
-    <Collapsible open={open} onOpenChange={onOpenChange} className="mb-1">
-      <div className="flex items-center gap-1">
-        <CollapsibleTrigger className="flex flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-[13px] font-medium text-muted-foreground hover:bg-muted/60 hover:text-foreground">
-          <ChevronRight className={cn("size-3.5 transition-transform", open && "rotate-90")} />
-          {title}
-          <span className="rounded-full bg-muted px-1.5 text-[10px] font-normal text-muted-foreground">{count.toLocaleString()}</span>
-        </CollapsibleTrigger>
-        {action}
-      </div>
-      <CollapsibleContent className="space-y-0.5">{children}</CollapsibleContent>
-    </Collapsible>
-  );
-}
-
 const SORTS: Record<string, string> = { recent: "Most recent", oldest: "Oldest first", title: "Title A to Z", size: "Largest first" };
 const SCOPES: Record<string, string> = { all: "All", live: "On this PC", backup: "Backup only", archived: "Archived" };
 
-function FiltersMenu({ sort, scope, organize, tags, onSort, onScope, onOrganize, onReset }: { tags: [string, number][]; sort: string; scope: string; organize: string; onSort: (s: string) => void; onScope: (s: string) => void; onOrganize: (s: string) => void; onReset: () => void }) {
-  const applied = (sort !== "recent" ? 1 : 0) + (scope !== "all" ? 1 : 0);
+function FiltersMenu({
+  sort,
+  scope,
+  tags,
+  onSort,
+  onScope,
+  onReset,
+}: {
+  tags: [string, number][];
+  sort: string;
+  scope: string;
+  onSort: (s: string) => void;
+  onScope: (s: string) => void;
+  onReset: () => void;
+}) {
+  const isFiltered = sort !== "recent" || scope !== "all";
   return (
     <DropdownMenu>
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <DropdownMenuTrigger render={<Button variant="ghost" size="icon" aria-label="Filters" className="relative size-7 shrink-0 text-muted-foreground" />}>
-              <ListFilter className="size-4" />
-              {applied > 0 && (
-                <span className="absolute -right-0.5 -top-0.5 flex size-3.5 items-center justify-center rounded-full bg-primary text-[9px] text-primary-foreground">{applied}</span>
-              )}
-            </DropdownMenuTrigger>
-          }
-        />
-        <TooltipContent>Filters</TooltipContent>
-      </Tooltip>
-      <DropdownMenuContent align="end" className="w-52">
+      <DropdownMenuTrigger render={<Button variant="ghost" size="icon" aria-label="Filters" className="size-7 shrink-0 text-muted-foreground hover:text-foreground" />}>
+        <MoreHorizontal className="size-4.5" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-48 rounded-xl border border-border bg-popover p-1 font-sans text-[13px] text-popover-foreground shadow-2xl dark:border-white/10 dark:bg-[#1a1c1e] dark:text-foreground">
         <DropdownMenuSub>
-          <DropdownMenuSubTrigger>
-            <LayoutDashboard className="size-4" strokeWidth={1.5} /> Organize sidebar
+          <DropdownMenuSubTrigger className="gap-2">
+            <ArrowUpDown className="size-4 text-muted-foreground" strokeWidth={1.5} /> Sort by
           </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent className="w-44">
-            <DropdownMenuRadioGroup value={organize} onValueChange={onOrganize}>
-              <DropdownMenuRadioItem value="project">
-                <FolderOpen className="size-4" strokeWidth={1.5} /> By project
-              </DropdownMenuRadioItem>
-              <DropdownMenuRadioItem value="list">
-                <ListFilter className="size-4" strokeWidth={1.5} /> In one list
-              </DropdownMenuRadioItem>
-            </DropdownMenuRadioGroup>
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger>
-            <ArrowUpDown className="size-4" strokeWidth={1.5} /> Sort chats by
-          </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent className="w-44">
+          <DropdownMenuSubContent className="w-44 rounded-xl border border-border bg-popover p-1 font-sans text-[13px] text-popover-foreground shadow-2xl dark:border-white/10 dark:bg-[#1a1c1e] dark:text-foreground">
             <DropdownMenuRadioGroup value={sort} onValueChange={onSort}>
               {Object.entries(SORTS).map(([k, label]) => (
                 <DropdownMenuRadioItem key={k} value={k}>
@@ -1359,29 +1446,33 @@ function FiltersMenu({ sort, scope, organize, tags, onSort, onScope, onOrganize,
           </DropdownMenuSubContent>
         </DropdownMenuSub>
         <DropdownMenuSub>
-          <DropdownMenuSubTrigger>
-            <Eye className="size-4" strokeWidth={1.5} /> Show
+          <DropdownMenuSubTrigger className="gap-2">
+            <Eye className="size-4 text-muted-foreground" strokeWidth={1.5} /> Filter
           </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent className="w-44">
+          <DropdownMenuSubContent className="w-44 rounded-xl border border-border bg-popover p-1 font-sans text-[13px] text-popover-foreground shadow-2xl dark:border-white/10 dark:bg-[#1a1c1e] dark:text-foreground">
             <DropdownMenuRadioGroup value={scope} onValueChange={onScope}>
               {Object.entries(SCOPES).map(([k, label]) => (
                 <DropdownMenuRadioItem key={k} value={k}>
                   {label}
                 </DropdownMenuRadioItem>
               ))}
-              {tags.length > 0 && <DropdownMenuSeparator />}
+              {tags.length > 0 && <DropdownMenuSeparator className="bg-border dark:bg-white/10" />}
               {tags.map(([t, n]) => (
                 <DropdownMenuRadioItem key={t} value={`tag:${t}`}>
-                  <Tag className="size-3.5" strokeWidth={1.5} /> {t} <span className="ml-auto text-xs text-muted-foreground">{n}</span>
+                  <Tag className="size-3.5 text-muted-foreground" strokeWidth={1.5} /> {t} <span className="ml-auto text-xs text-muted-foreground">{n}</span>
                 </DropdownMenuRadioItem>
               ))}
             </DropdownMenuRadioGroup>
           </DropdownMenuSubContent>
         </DropdownMenuSub>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem disabled={applied === 0 && organize === "list"} onClick={onReset}>
-          <RotateCcw className="size-4" strokeWidth={1.5} /> Reset
-        </DropdownMenuItem>
+        {isFiltered && (
+          <>
+            <DropdownMenuSeparator className="bg-white/10" />
+            <DropdownMenuItem onClick={onReset} className="gap-2 text-muted-foreground hover:text-foreground">
+              <RotateCcw className="size-3.5" strokeWidth={1.5} /> Reset filters
+            </DropdownMenuItem>
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

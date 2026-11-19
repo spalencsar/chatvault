@@ -188,12 +188,23 @@ pub fn scan(out: &mut Vec<OtherChat>) {
             if !seen.insert(id.clone()) {
                 continue;
             }
-            let fallback = first_user_text(&c, &id).unwrap_or_else(|| "Antigravity chat".into());
-            let title = [title.trim(), preview.trim()]
-                .into_iter()
-                .find(|s| !s.is_empty())
-                .map(|s| clip(s, 80))
-                .unwrap_or(fallback);
+            let clean_title = title.trim();
+            let clean_preview = preview.trim();
+            let prompt = first_user_text(&c, &id);
+            let (final_title, final_preview) = if !clean_title.is_empty() {
+                let p = if !clean_preview.is_empty() && clean_preview != clean_title {
+                    clean_preview.to_string()
+                } else {
+                    prompt.unwrap_or_else(|| clean_title.to_string())
+                };
+                (clip(clean_title, 80), Some(clip(&p, 200)))
+            } else if !clean_preview.is_empty() {
+                (clip(clean_preview, 80), prompt.map(|p| clip(&p, 200)))
+            } else {
+                let fb = prompt.unwrap_or_else(|| "Antigravity chat".into());
+                let short = clip(&fb, 80);
+                (short, Some(fb))
+            };
             let last_ms = [timestamp_ms(&modified), timestamp_ms(&last_user)]
                 .into_iter()
                 .flatten()
@@ -203,7 +214,7 @@ pub fn scan(out: &mut Vec<OtherChat>) {
             out.push(OtherChat {
                 provider: "antigravity",
                 id: id.clone(),
-                title,
+                title: final_title,
                 cwd: workspace(&workspaces),
                 created_ms: None,
                 last_ms,
@@ -211,6 +222,7 @@ pub fn scan(out: &mut Vec<OtherChat>) {
                 path: format!("{PREFIX}{}|{id}", db.display()),
                 model: None,
                 account: None,
+                preview: final_preview,
             });
         }
     }

@@ -176,11 +176,13 @@ fn scan_db(db: &Path, out: &mut Vec<OtherChat>) {
         if count == 0 {
             continue;
         }
+        let prompt = first_user_text(&c, &ids);
         let title = if s.title.trim().is_empty() {
-            first_user_text(&c, &ids).unwrap_or_else(|| "Hermes chat".into())
+            prompt.clone().unwrap_or_else(|| "Hermes chat".into())
         } else {
             s.title.clone()
         };
+        let preview = prompt.or_else(|| Some(title.clone())).map(|p| clip(&p, 200));
         out.push(OtherChat {
             provider: "hermes",
             id: s.id.clone(),
@@ -200,6 +202,7 @@ fn scan_db(db: &Path, out: &mut Vec<OtherChat>) {
             } else {
                 s.source.clone()
             }),
+            preview,
         });
     }
 }

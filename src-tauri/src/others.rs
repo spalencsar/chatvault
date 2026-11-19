@@ -27,6 +27,7 @@ pub struct OtherChat {
     pub model: Option<String>,
     /// Set for imported NousSave chats: the web platform (ChatGPT, Gemini, Grok, …).
     pub account: Option<String>,
+    pub preview: Option<String>,
 }
 
 fn ms_of(iso: &str) -> Option<i64> {
@@ -161,6 +162,7 @@ fn scan_gemini(out: &mut Vec<OtherChat>) {
         let Some(first) = msgs.iter().find(|m| m.role == "user") else { continue };
         let first_line = first.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("Chat").trim();
         let id = j.get("sessionId").and_then(|s| s.as_str()).map(String::from).unwrap_or_else(|| p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
+        let preview = Some(clip(first.text.trim(), 200));
         out.push(OtherChat {
             provider: "gemini",
             id,
@@ -172,6 +174,7 @@ fn scan_gemini(out: &mut Vec<OtherChat>) {
             path: format!("gemini:{}", p.to_string_lossy()),
             model: None,
             account: None,
+            preview,
         });
     }
 }
@@ -245,6 +248,23 @@ fn scan_opencode_db(db:&Path,out:&mut Vec<OtherChat>) {
         for (id, title, dir, created, updated, n, model) in rows.flatten() {
             if n == 0 || !seen.insert(id.clone()) { continue; }
             let title = title.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| "OpenCode chat".into());
+            let preview = if table_exists(&c, "part") {
+                c.query_row(
+                    &format!(
+                        "SELECT json_extract(data, '$.text') FROM part WHERE message_id IN (SELECT id FROM {messages} WHERE session_id=?1) AND json_extract(data, '$.text') IS NOT NULL AND trim(json_extract(data, '$.text')) != '' LIMIT 1"
+                    ),
+                    [&id],
+                    |r| r.get::<_, String>(0),
+                ).ok().map(|t| clip(t.trim(), 200))
+            } else {
+                c.query_row(
+                    &format!(
+                        "SELECT text FROM {messages} WHERE session_id=?1 AND text IS NOT NULL AND trim(text) != '' LIMIT 1"
+                    ),
+                    [&id],
+                    |r| r.get::<_, String>(0),
+                ).ok().map(|t| clip(t.trim(), 200))
+            };
             out.push(OtherChat {
                 provider: "opencode",
                 id: id.clone(),
@@ -256,6 +276,7 @@ fn scan_opencode_db(db:&Path,out:&mut Vec<OtherChat>) {
                 path: format!("opencode:{}|{}", db.display(), id),
                 model,
                 account: None,
+                preview,
             });
         }
     }
@@ -525,6 +546,7 @@ fn scan_cline(out: &mut Vec<OtherChat>) {
         let started = mj.as_ref().and_then(|m| m.get("started_at")).and_then(|s| s.as_str()).and_then(ms_of);
         let ended = mj.as_ref().and_then(|m| m.get("ended_at")).and_then(|s| s.as_str()).and_then(ms_of);
         let id = p.parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let preview = Some(clip(first.text.trim(), 200));
         out.push(OtherChat {
             provider: "cline",
             id,
@@ -536,6 +558,7 @@ fn scan_cline(out: &mut Vec<OtherChat>) {
             path: format!("cline:{}", p.to_string_lossy()),
             model: mj.as_ref().and_then(|m| m.get("model")).and_then(|s| s.as_str()).map(String::from),
             account: None,
+            preview,
         });
     }
 }

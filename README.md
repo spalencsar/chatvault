@@ -28,19 +28,21 @@ ChatVault brings those conversations together in one native desktop interface
 without requiring an account or sending chat content to a remote service.
 
 - **Unified library** — browse conversations from supported coding assistants in
-  one place.
-- **Fast local search** — search across tools, projects, accounts, and message
-  content.
+  one place with a Linux-native dark workspace interface.
+- **Fast local search & deep jumping** — full-text search across tools, projects,
+  accounts, and message content (`Ctrl`+`K` / Deep Search), jumping directly to
+  matching lines with highlight glow.
 - **Focused reading** — render Markdown, code, images, tool calls, reasoning,
   plans, citations, and other structured content.
 - **Organization** — rename, tag, archive, and group conversations by project or
   source.
 - **Portable exports** — export conversations as Markdown, HTML, plain text, or
-  JSON.
+  structured JSON, including one-click bulk archives.
 - **CLI handoff** — continue supported conversations in their original command-line
   tool.
-- **Backup and sync** — maintain an optional local backup alongside the original
-  session files.
+- **Backup, sync, and tarball bundles** — maintain scheduled local backups, create
+  compressed `.tar.gz` archives, and run granular dry-run restore previews with
+  tool-level selection.
 - **Independent archive** — keep normalized, private copies of parsed chats so
   they remain readable even if an original tool removes or changes its data.
 - **Web-chat imports** — import NousSave JSON or Markdown exports from services
@@ -137,11 +139,11 @@ Prebuilt x86_64 Linux packages are available from the
 
 ```bash
 # Debian or Ubuntu
-sudo apt install ./ChatVault_0.6.2_amd64.deb
+sudo apt install ./ChatVault_0.7.0_amd64.deb
 
 # Distribution-independent AppImage
-chmod +x ChatVault_0.6.2_amd64.AppImage
-./ChatVault_0.6.2_amd64.AppImage
+chmod +x ChatVault_0.7.0_amd64.AppImage
+./ChatVault_0.7.0_amd64.AppImage
 ```
 
 When building from source instead, run:

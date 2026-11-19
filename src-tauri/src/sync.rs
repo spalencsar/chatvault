@@ -22,6 +22,32 @@ pub struct SyncStats {
     pub total: usize,
 }
 
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceBreakdown {
+    pub source: String,
+    pub label: String,
+    pub files: usize,
+    pub bytes: u64,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreCandidate {
+    pub source: String,
+    pub filename: String,
+    pub bytes: u64,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RestorePreview {
+    pub total_files: usize,
+    pub total_bytes: u64,
+    pub by_source: Vec<SourceBreakdown>,
+    pub sample_candidates: Vec<RestoreCandidate>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupStatus {
@@ -30,6 +56,7 @@ pub struct BackupStatus {
     pub files: usize,
     pub bytes: u64,
     pub last_sync_ms: Option<i64>,
+    pub breakdown: Vec<SourceBreakdown>,
 }
 
 #[derive(Serialize, Clone)]
@@ -38,6 +65,13 @@ struct Progress {
     done: usize,
     total: usize,
     current: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct SyncPair {
+    pub source: String,
+    pub src: PathBuf,
+    pub dst: PathBuf,
 }
 
 pub(crate) fn walk_all(root: &Path, out: &mut Vec<PathBuf>) {
@@ -52,56 +86,100 @@ pub(crate) fn walk_all(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+pub fn source_label(source: &str) -> &'static str {
+    match source {
+        "archive" => "Snapshot Archive",
+        "claude" => "Claude Code",
+        "codex" => "Codex",
+        "cursor" => "Cursor",
+        "gemini" => "Gemini CLI",
+        "cline" => "Cline",
+        "opencode" => "OpenCode",
+        "grok" => "Grok",
+        "hermes" => "Hermes Agent",
+        "antigravity" => "Antigravity",
+        "imported" => "Imported",
+        _ => "Other",
+    }
+}
+
+fn calculate_breakdown(root: &Path) -> Vec<SourceBreakdown> {
+    let mut map: std::collections::BTreeMap<String, (usize, u64)> = std::collections::BTreeMap::new();
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                if name.starts_with('.') {
+                    continue;
+                }
+                let mut sub_files = Vec::new();
+                walk_all(&path, &mut sub_files);
+                let bytes: u64 = sub_files.iter().filter_map(|f| fs::metadata(f).ok()).map(|m| m.len()).sum();
+                map.insert(name, (sub_files.len(), bytes));
+            }
+        }
+    }
+    map.into_iter()
+        .map(|(source, (files, bytes))| SourceBreakdown {
+            label: source_label(&source).to_string(),
+            source,
+            files,
+            bytes,
+        })
+        .collect()
+}
+
 /// (source, destination) pairs. `forward` = live -> backup, otherwise backup -> live.
-fn pairs(forward: bool) -> Vec<(PathBuf, PathBuf)> {
+fn pairs(forward: bool) -> Vec<SyncPair> {
     let Some(b) = backup_root() else { return Vec::new() };
-    // (live root, backup root, filter: 0 = everything, 1 = Claude transcripts only, 2 = Cursor transcripts only, 3 = Gemini chats, 4 = OpenCode database)
-    let mut maps: Vec<(PathBuf, PathBuf, u8)> = Vec::new();
+    // (source_id, live root, backup root, filter: 0 = everything, 1 = Claude transcripts only, 2 = Cursor transcripts only, 3 = Gemini chats, 4 = OpenCode database, 5 = Grok)
+    let mut maps: Vec<(&'static str, PathBuf, PathBuf, u8)> = Vec::new();
     let on = crate::integrations::is_enabled;
     // Provider-independent snapshots are always safe to copy both ways: they belong to ChatVault,
     // not to a live tool database, and restoring them never writes into another application.
     if let Some(p) = crate::archive::root() {
-        maps.push((p, b.join("archive"), 0));
+        maps.push(("archive", p, b.join("archive"), 0));
     }
     if let (true, Some(p)) = (on("claude"), claude_projects()) {
-        maps.push((p, b.join("claude").join("projects"), 1));
+        maps.push(("claude", p, b.join("claude").join("projects"), 1));
     }
     if let (true, Some(p)) = (on("claude"), claude_meta()) {
-        maps.push((p, b.join("claude").join("sessions-meta"), 0));
+        maps.push(("claude", p, b.join("claude").join("sessions-meta"), 0));
     }
     if let (true, Some(c)) = (on("codex"), codex_home()) {
-        maps.push((c.join("sessions"), b.join("codex").join("sessions"), 0));
-        maps.push((c.join("archived_sessions"), b.join("codex").join("archived_sessions"), 0));
+        maps.push(("codex", c.join("sessions"), b.join("codex").join("sessions"), 0));
+        maps.push(("codex", c.join("archived_sessions"), b.join("codex").join("archived_sessions"), 0));
     }
     // Cursor: the plain-text agent transcripts and the CLI chat stores. The IDE database itself is not copied while Cursor may be writing to it.
     if let (true, Some(h)) = (on("cursor"), home()) {
-        maps.push((h.join(".cursor").join("projects"), b.join("cursor").join("projects"), 2));
-        maps.push((h.join(".cursor").join("chats"), b.join("cursor").join("chats"), 0));
+        maps.push(("cursor", h.join(".cursor").join("projects"), b.join("cursor").join("projects"), 2));
+        maps.push(("cursor", h.join(".cursor").join("chats"), b.join("cursor").join("chats"), 0));
     }
     // Gemini CLI (chat files per project) and Cline (one folder per task). OpenCode keeps everything in one SQLite file:
     // it is copied into the backup but never written back over the live one.
     if let Some(h) = home() {
         if on("gemini") {
-            maps.push((h.join(".gemini").join("tmp"), b.join("gemini").join("tmp"), 3));
+            maps.push(("gemini", h.join(".gemini").join("tmp"), b.join("gemini").join("tmp"), 3));
         }
         if on("cline") {
-            maps.push((h.join(".cline").join("data").join("sessions"), b.join("cline").join("sessions"), 0));
+            maps.push(("cline", h.join(".cline").join("data").join("sessions"), b.join("cline").join("sessions"), 0));
         }
         if forward && on("opencode") {
             let db = h.join(".local").join("share").join("opencode");
-            maps.push((db, b.join("opencode"), 4));
+            maps.push(("opencode", db, b.join("opencode"), 4));
         }
         if on("grok") {
-            maps.push((h.join(".grok").join("sessions"), b.join("grok").join("sessions"), 5));
+            maps.push(("grok", h.join(".grok").join("sessions"), b.join("grok").join("sessions"), 5));
         }
     }
     if on("imported") {
         if let Some(d) = crate::imported::root() {
-            maps.push((d, b.join("imported"), 0));
+            maps.push(("imported", d, b.join("imported"), 0));
         }
     }
     let mut out = Vec::new();
-    for (live, back, filter) in maps {
+    for (src_name, live, back, filter) in maps {
         let (from, to) = if forward { (&live, &back) } else { (&back, &live) };
         let mut files = Vec::new();
         walk_all(from, &mut files);
@@ -134,7 +212,11 @@ fn pairs(forward: bool) -> Vec<(PathBuf, PathBuf)> {
                     continue;
                 }
             }
-            out.push((f.clone(), to.join(rel)));
+            out.push(SyncPair {
+                source: src_name.to_string(),
+                src: f.clone(),
+                dst: to.join(rel),
+            });
         }
     }
     out
@@ -155,7 +237,7 @@ fn needs_copy(src: &Path, dst: &Path, overwrite_changed: bool) -> bool {
     }
 }
 
-fn run(app: &AppHandle, forward: bool) -> Result<SyncStats, String> {
+fn run(app: &AppHandle, forward: bool, source_filter: Option<Vec<String>>) -> Result<SyncStats, String> {
     if BUSY.swap(true, Ordering::SeqCst) {
         return Err("A sync is already running".into());
     }
@@ -163,14 +245,19 @@ fn run(app: &AppHandle, forward: bool) -> Result<SyncStats, String> {
         let root = backup_root().ok_or("No Documents folder")?;
         fs::create_dir_all(&root).map_err(|e| e.to_string())?;
         let all = pairs(forward);
-        let todo: Vec<&(PathBuf, PathBuf)> = all.iter().filter(|(s, d)| needs_copy(s, d, forward)).collect();
+        let mut todo: Vec<&SyncPair> = all.iter().filter(|p| needs_copy(&p.src, &p.dst, forward)).collect();
+        if let Some(ref allowed) = source_filter {
+            if !allowed.is_empty() {
+                todo.retain(|p| allowed.contains(&p.source));
+            }
+        }
         let mut stats = SyncStats { total: todo.len(), skipped: all.len() - todo.len(), ..Default::default() };
         let phase = if forward { "Backing up" } else { "Restoring" };
-        for (i, (src, dst)) in todo.iter().enumerate() {
-            if let Some(parent) = dst.parent() {
+        for (i, pair) in todo.iter().enumerate() {
+            if let Some(parent) = pair.dst.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            match fs::copy(src, dst) {
+            match fs::copy(&pair.src, &pair.dst) {
                 Ok(n) => {
                     stats.copied += 1;
                     stats.bytes += n;
@@ -184,7 +271,7 @@ fn run(app: &AppHandle, forward: bool) -> Result<SyncStats, String> {
                         phase: phase.into(),
                         done: i + 1,
                         total: todo.len(),
-                        current: src.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                        current: pair.src.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
                     },
                 );
             }
@@ -250,16 +337,89 @@ fn merge_codex_index(forward: bool) {
 }
 
 pub fn backup(app: &AppHandle) -> Result<SyncStats, String> {
-    run(app, true)
+    run(app, true, None)
 }
 
 pub fn restore(app: &AppHandle) -> Result<SyncStats, String> {
-    run(app, false)
+    run(app, false, None)
+}
+
+pub fn restore_selected(app: &AppHandle, sources: Option<Vec<String>>) -> Result<SyncStats, String> {
+    run(app, false, sources)
+}
+
+pub fn preview_restore() -> Result<RestorePreview, String> {
+    let all = pairs(false);
+    let missing: Vec<&SyncPair> = all.iter().filter(|p| needs_copy(&p.src, &p.dst, false)).collect();
+
+    let mut by_source_map: std::collections::BTreeMap<String, (usize, u64)> = std::collections::BTreeMap::new();
+    let mut candidates = Vec::new();
+
+    let mut total_bytes = 0u64;
+    for pair in &missing {
+        let b = fs::metadata(&pair.src).map(|m| m.len()).unwrap_or(0);
+        total_bytes += b;
+        let entry = by_source_map.entry(pair.source.clone()).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += b;
+
+        if candidates.len() < 50 {
+            candidates.push(RestoreCandidate {
+                source: pair.source.clone(),
+                filename: pair.src.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                bytes: b,
+            });
+        }
+    }
+
+    let by_source = by_source_map
+        .into_iter()
+        .map(|(source, (files, bytes))| SourceBreakdown {
+            label: source_label(&source).to_string(),
+            source,
+            files,
+            bytes,
+        })
+        .collect();
+
+    Ok(RestorePreview {
+        total_files: missing.len(),
+        total_bytes,
+        by_source,
+        sample_candidates: candidates,
+    })
+}
+
+pub fn create_tarball(target_path: &Path) -> Result<(usize, u64), String> {
+    let root = backup_root().ok_or("No backup root folder configured")?;
+    if !root.exists() {
+        return Err("Backup folder does not exist yet. Run a backup first.".into());
+    }
+    if let Some(parent) = target_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let output = std::process::Command::new("tar")
+        .arg("-czf")
+        .arg(target_path)
+        .arg("-C")
+        .arg(&root)
+        .arg(".")
+        .output()
+        .map_err(|e| format!("Failed to run tar command: {e}"))?;
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Tar compression failed: {err}"));
+    }
+    let meta = fs::metadata(target_path).map_err(|e| e.to_string())?;
+    let mut files = Vec::new();
+    walk_all(&root, &mut files);
+    Ok((files.len(), meta.len()))
 }
 
 pub fn status() -> BackupStatus {
     let Some(root) = backup_root() else {
-        return BackupStatus { path: String::new(), exists: false, files: 0, bytes: 0, last_sync_ms: None };
+        return BackupStatus { path: String::new(), exists: false, files: 0, bytes: 0, last_sync_ms: None, breakdown: Vec::new() };
     };
     let mut files = Vec::new();
     walk_all(&root, &mut files);
@@ -268,11 +428,13 @@ pub fn status() -> BackupStatus {
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .and_then(|v| v.get("lastSyncMs").and_then(|x| x.as_i64()));
+    let breakdown = calculate_breakdown(&root);
     BackupStatus {
         path: root.to_string_lossy().to_string(),
         exists: root.exists(),
         files: files.len(),
         bytes,
         last_sync_ms,
+        breakdown,
     }
 }
